@@ -1,0 +1,574 @@
+import express, { Express, Request, Response, NextFunction } from 'express';
+import cors from 'cors';
+import helmet from 'helmet';
+import type {
+  PaylinkConfig,
+  PayLink,
+  Payment,
+  CreatePayLinkInput,
+  Protocol402Response,
+  Protocol403Response,
+  Storage,
+} from './types.js';
+import { ReasonCode } from './types.js';
+import { MemoryStorage } from './storage.js';
+import { ChainVerifier, MockVerifier } from './chain.js';
+import {
+  generateId,
+  generateUUID,
+  generateNonce,
+  sign,
+  isExpired,
+  isLimitReached,
+  REASON_MESSAGES,
+} from './utils.js';
+
+/**
+ * Paylink Server
+ * Self-hosted paid links with blockchain payment verification
+ */
+export class PaylinkServer {
+  private app: Express;
+  private config: Required<Omit<PaylinkConfig, 'chains'>> & { chains: PaylinkConfig['chains'] };
+  private storage: Storage;
+  private verifiers: Map<number, ChainVerifier | MockVerifier>;
+
+  constructor(config: PaylinkConfig) {
+    // Default config
+    this.config = {
+      port: config.port ?? 3000,
+      baseUrl: config.baseUrl ?? '',
+      basePath: config.basePath ?? '/pay',
+      chains: config.chains,
+      paymentTimeout: config.paymentTimeout ?? 900,
+      signatureSecret: config.signatureSecret ?? '',
+      apiKey: config.apiKey ?? '',
+      cors: config.cors ?? true,
+    };
+
+    this.storage = new MemoryStorage();
+    this.verifiers = new Map();
+
+    // Initialize chain verifiers
+    for (const chain of config.chains) {
+      if (chain.rpcUrl === 'mock') {
+        this.verifiers.set(chain.chainId, new MockVerifier());
+      } else {
+        this.verifiers.set(chain.chainId, new ChainVerifier(chain));
+      }
+    }
+
+    this.app = express();
+    this.setupMiddleware();
+    this.setupRoutes();
+  }
+
+  /**
+   * Get Express app instance
+   */
+  getApp(): Express {
+    return this.app;
+  }
+
+  /**
+   * Get storage instance
+   */
+  getStorage(): Storage {
+    return this.storage;
+  }
+
+  /**
+   * Set custom storage
+   */
+  setStorage(storage: Storage): void {
+    this.storage = storage;
+  }
+
+  /**
+   * Start server
+   */
+  start(): void {
+    this.app.listen(this.config.port, () => {
+      console.log('');
+      console.log('╔══════════════════════════════════════════════════════════╗');
+      console.log('║              Paylink Protocol Server                     ║');
+      console.log('╠══════════════════════════════════════════════════════════╣');
+      console.log(`║  Port:     ${String(this.config.port).padEnd(44)}║`);
+      console.log(`║  Base URL: ${(this.config.baseUrl || 'http://localhost:' + this.config.port).padEnd(44)}║`);
+      console.log(`║  Chains:   ${this.config.chains.map(c => c.name).join(', ').padEnd(44)}║`);
+      console.log('╚══════════════════════════════════════════════════════════╝');
+      console.log('');
+      console.log('Endpoints:');
+      console.log(`  GET  ${this.config.basePath}/:id          → Payment page (402/403/302)`);
+      console.log(`  GET  ${this.config.basePath}/:id/status   → Check payment status`);
+      console.log(`  POST ${this.config.basePath}/:id/confirm  → Confirm with txHash`);
+      console.log('');
+      if (this.config.apiKey) {
+        console.log('Admin API (X-API-Key header required):');
+        console.log('  POST   /api/links       → Create link');
+        console.log('  GET    /api/links       → List links');
+        console.log('  GET    /api/links/:id   → Get link');
+        console.log('  DELETE /api/links/:id   → Disable link');
+        console.log('  GET    /api/payments    → List payments');
+        console.log('');
+      }
+    });
+  }
+
+  // ========================================
+  // PAYLINK METHODS
+  // ========================================
+
+  /**
+   * Create a new payment link
+   */
+  async createPayLink(input: CreatePayLinkInput): Promise<PayLink> {
+    const now = new Date();
+    
+    const payLink: PayLink = {
+      id: generateId(),
+      targetUrl: input.targetUrl,
+      price: input.price,
+      recipientAddress: input.recipientAddress,
+      status: 'active',
+      createdAt: now,
+      updatedAt: now,
+      description: input.description,
+      maxUses: input.maxUses,
+      usedCount: 0,
+      expiresAt: input.expiresAt,
+      metadata: input.metadata,
+    };
+
+    await this.storage.savePayLink(payLink);
+    return payLink;
+  }
+
+  /**
+   * Get payment link by ID
+   */
+  async getPayLink(id: string): Promise<PayLink | null> {
+    return this.storage.getPayLink(id);
+  }
+
+  /**
+   * Disable a payment link
+   */
+  async disablePayLink(id: string): Promise<void> {
+    const link = await this.storage.getPayLink(id);
+    if (!link) throw new Error('Link not found');
+    
+    link.status = 'disabled';
+    await this.storage.updatePayLink(link);
+  }
+
+  // ========================================
+  // PRIVATE METHODS
+  // ========================================
+
+  private setupMiddleware(): void {
+    this.app.use(helmet());
+    
+    if (this.config.cors) {
+      this.app.use(cors({ origin: '*', methods: ['GET', 'POST', 'DELETE'] }));
+    }
+    
+    this.app.use(express.json());
+    this.app.set('trust proxy', 1);
+
+    // Request logging
+    this.app.use((req, res, next) => {
+      const start = Date.now();
+      res.on('finish', () => {
+        console.log(`${req.method} ${req.path} ${res.statusCode} ${Date.now() - start}ms`);
+      });
+      next();
+    });
+  }
+
+  private setupRoutes(): void {
+    // Health check
+    this.app.get('/health', (req, res) => {
+      res.json({ status: 'ok', timestamp: new Date().toISOString() });
+    });
+
+    // API info
+    this.app.get('/', (req, res) => {
+      const base = this.config.baseUrl || `http://localhost:${this.config.port}`;
+      res.json({
+        name: 'Paylink Protocol',
+        version: '1.0.0',
+        chains: this.config.chains.map(c => ({ id: c.chainId, name: c.name, symbol: c.symbol })),
+        endpoints: {
+          paylink: `${base}${this.config.basePath}/:id`,
+          status: `${base}${this.config.basePath}/:id/status`,
+          confirm: `${base}${this.config.basePath}/:id/confirm`,
+        },
+      });
+    });
+
+    // Paylink routes
+    this.app.get(`${this.config.basePath}/:id`, this.handlePayLink.bind(this));
+    this.app.get(`${this.config.basePath}/:id/status`, this.handleStatus.bind(this));
+    this.app.post(`${this.config.basePath}/:id/confirm`, this.handleConfirm.bind(this));
+
+    // Admin API
+    if (this.config.apiKey) {
+      const auth = this.authMiddleware.bind(this);
+      this.app.post('/api/links', auth, this.apiCreateLink.bind(this));
+      this.app.get('/api/links', auth, this.apiListLinks.bind(this));
+      this.app.get('/api/links/:id', auth, this.apiGetLink.bind(this));
+      this.app.delete('/api/links/:id', auth, this.apiDeleteLink.bind(this));
+      this.app.get('/api/payments', auth, this.apiListPayments.bind(this));
+    }
+  }
+
+  private authMiddleware(req: Request, res: Response, next: NextFunction): void {
+    const key = req.headers['x-api-key'];
+    if (key !== this.config.apiKey) {
+      res.status(401).json({ error: 'Invalid API key' });
+      return;
+    }
+    next();
+  }
+
+  // ========================================
+  // PAYLINK HANDLERS
+  // ========================================
+
+  private async handlePayLink(req: Request, res: Response): Promise<void> {
+    try {
+      const link = await this.storage.getPayLink(req.params.id);
+
+      if (!link) {
+        res.status(404).json({ error: 'Payment link not found' });
+        return;
+      }
+
+      // Check if disabled
+      if (link.status !== 'active') {
+        this.send403(res, ReasonCode.LINK_DISABLED, link.id);
+        return;
+      }
+
+      // Check if expired
+      if (isExpired(link.expiresAt)) {
+        this.send403(res, ReasonCode.LINK_EXPIRED, link.id, {
+          expiredAt: link.expiresAt?.toISOString(),
+        });
+        return;
+      }
+
+      // Check usage limit
+      if (isLimitReached(link.usedCount, link.maxUses)) {
+        this.send403(res, ReasonCode.LINK_USAGE_LIMIT_REACHED, link.id, {
+          maxUses: link.maxUses,
+          usedCount: link.usedCount,
+        });
+        return;
+      }
+
+      // Check for confirmed payment
+      const payment = await this.storage.getConfirmedPayment(link.id);
+
+      if (payment) {
+        // Increment usage and redirect
+        link.usedCount = (link.usedCount ?? 0) + 1;
+        await this.storage.updatePayLink(link);
+        res.redirect(302, link.targetUrl);
+        return;
+      }
+
+      // No payment - return 402
+      this.send402(res, link);
+    } catch (error) {
+      console.error('PayLink error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+
+  private async handleStatus(req: Request, res: Response): Promise<void> {
+    try {
+      const link = await this.storage.getPayLink(req.params.id);
+
+      if (!link) {
+        res.json({ status: 'not_found' });
+        return;
+      }
+
+      if (link.status !== 'active') {
+        res.json({ status: 'forbidden' });
+        return;
+      }
+
+      if (isExpired(link.expiresAt) || isLimitReached(link.usedCount, link.maxUses)) {
+        res.json({ status: 'forbidden' });
+        return;
+      }
+
+      const payment = await this.storage.getConfirmedPayment(link.id);
+      res.json({ status: payment ? 'paid' : 'unpaid' });
+    } catch (error) {
+      console.error('Status error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+
+  private async handleConfirm(req: Request, res: Response): Promise<void> {
+    try {
+      const { txHash } = req.body;
+
+      if (!txHash || typeof txHash !== 'string') {
+        res.status(400).json({ status: 'failed', message: 'Missing txHash' });
+        return;
+      }
+
+      const link = await this.storage.getPayLink(req.params.id);
+
+      if (!link) {
+        res.status(404).json({ status: 'failed', message: 'Link not found' });
+        return;
+      }
+
+      // Check if already confirmed
+      const existing = await this.storage.getPaymentByTxHash(txHash);
+      if (existing?.confirmed) {
+        res.json({ status: 'confirmed', message: 'Already confirmed' });
+        return;
+      }
+
+      // Get verifier for chain
+      const verifier = this.verifiers.get(link.price.chainId);
+      if (!verifier) {
+        res.status(400).json({ status: 'failed', message: 'Chain not supported' });
+        return;
+      }
+
+      // Verify payment
+      const result = await verifier.verifyPayment({
+        txHash,
+        recipient: link.recipientAddress,
+        amount: link.price.amount,
+      });
+
+      switch (result.status) {
+        case 'confirmed': {
+          const payment: Payment = {
+            id: generateUUID(),
+            payLinkId: link.id,
+            chainId: link.price.chainId,
+            txHash,
+            fromAddress: result.fromAddress ?? '',
+            amount: result.actualAmount ?? link.price.amount,
+            confirmed: true,
+            createdAt: new Date(),
+            confirmedAt: new Date(),
+          };
+          await this.storage.savePayment(payment);
+          res.json({ status: 'confirmed' });
+          break;
+        }
+        case 'pending':
+          res.status(202).json({ status: 'pending', message: 'Transaction pending' });
+          break;
+        case 'underpaid':
+          res.status(400).json({
+            status: 'failed',
+            message: `Underpaid: received ${result.actualAmount}, required ${link.price.amount}`,
+          });
+          break;
+        default:
+          res.status(400).json({ status: 'failed', message: 'Transaction not found or failed' });
+      }
+    } catch (error) {
+      console.error('Confirm error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+
+  // ========================================
+  // ADMIN API HANDLERS
+  // ========================================
+
+  private async apiCreateLink(req: Request, res: Response): Promise<void> {
+    try {
+      const {
+        targetUrl,
+        amount,
+        tokenSymbol = 'ETH',
+        chainId = 1,
+        recipientAddress,
+        description,
+        maxUses,
+        expiresIn,
+      } = req.body;
+
+      if (!targetUrl || !amount || !recipientAddress) {
+        res.status(400).json({ error: 'Missing: targetUrl, amount, or recipientAddress' });
+        return;
+      }
+
+      const link = await this.createPayLink({
+        targetUrl,
+        price: { amount: String(amount), tokenSymbol, chainId: Number(chainId) },
+        recipientAddress,
+        description,
+        maxUses: maxUses ? Number(maxUses) : undefined,
+        expiresAt: expiresIn ? new Date(Date.now() + Number(expiresIn) * 1000) : undefined,
+      });
+
+      const base = this.config.baseUrl || `http://localhost:${this.config.port}`;
+
+      res.status(201).json({
+        success: true,
+        link: {
+          id: link.id,
+          url: `${base}${this.config.basePath}/${link.id}`,
+          targetUrl: link.targetUrl,
+          price: link.price,
+          recipientAddress: link.recipientAddress,
+          description: link.description,
+          maxUses: link.maxUses,
+          expiresAt: link.expiresAt?.toISOString(),
+        },
+      });
+    } catch (error) {
+      console.error('Create link error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+
+  private async apiListLinks(req: Request, res: Response): Promise<void> {
+    const links = await this.storage.getAllPayLinks();
+    const base = this.config.baseUrl || `http://localhost:${this.config.port}`;
+
+    res.json({
+      count: links.length,
+      links: links.map(l => ({
+        id: l.id,
+        url: `${base}${this.config.basePath}/${l.id}`,
+        status: l.status,
+        price: l.price,
+        usedCount: l.usedCount,
+      })),
+    });
+  }
+
+  private async apiGetLink(req: Request, res: Response): Promise<void> {
+    const link = await this.storage.getPayLink(req.params.id);
+
+    if (!link) {
+      res.status(404).json({ error: 'Link not found' });
+      return;
+    }
+
+    const base = this.config.baseUrl || `http://localhost:${this.config.port}`;
+
+    res.json({
+      id: link.id,
+      url: `${base}${this.config.basePath}/${link.id}`,
+      targetUrl: link.targetUrl,
+      price: link.price,
+      recipientAddress: link.recipientAddress,
+      status: link.status,
+      usedCount: link.usedCount,
+      maxUses: link.maxUses,
+      expiresAt: link.expiresAt?.toISOString(),
+      createdAt: link.createdAt.toISOString(),
+    });
+  }
+
+  private async apiDeleteLink(req: Request, res: Response): Promise<void> {
+    try {
+      await this.disablePayLink(req.params.id);
+      res.json({ success: true });
+    } catch {
+      res.status(404).json({ error: 'Link not found' });
+    }
+  }
+
+  private async apiListPayments(req: Request, res: Response): Promise<void> {
+    const payments = await this.storage.getAllPayments();
+
+    res.json({
+      count: payments.length,
+      payments: payments.map(p => ({
+        id: p.id,
+        payLinkId: p.payLinkId,
+        txHash: p.txHash,
+        amount: p.amount,
+        confirmed: p.confirmed,
+        createdAt: p.createdAt.toISOString(),
+      })),
+    });
+  }
+
+  // ========================================
+  // RESPONSE HELPERS
+  // ========================================
+
+  private send402(res: Response, link: PayLink): void {
+    const base = this.config.baseUrl || `http://localhost:${this.config.port}`;
+    const nonce = generateNonce();
+
+    const body: Protocol402Response = {
+      protocol: '402-paylink-v1',
+      payLinkId: link.id,
+      resource: {
+        description: link.description,
+        preview: null,
+      },
+      payment: {
+        chainId: link.price.chainId,
+        tokenSymbol: link.price.tokenSymbol,
+        amount: link.price.amount,
+        recipient: link.recipientAddress,
+        timeoutSeconds: this.config.paymentTimeout,
+      },
+      callbacks: {
+        status: `${base}${this.config.basePath}/${link.id}/status`,
+        confirm: `${base}${this.config.basePath}/${link.id}/confirm`,
+      },
+      nonce,
+    };
+
+    if (this.config.signatureSecret) {
+      const data = JSON.stringify({ payLinkId: body.payLinkId, payment: body.payment, nonce });
+      body.signature = sign(data, this.config.signatureSecret);
+    }
+
+    res.set({
+      'Content-Type': 'application/json; charset=utf-8',
+      'X-Paylink-Protocol': '402-v1',
+    });
+    res.status(402).json(body);
+  }
+
+  private send403(
+    res: Response,
+    code: ReasonCode,
+    payLinkId?: string,
+    details?: Record<string, unknown>
+  ): void {
+    const body: Protocol403Response = {
+      protocol: '403-paylink-v1',
+      payLinkId,
+      reasonCode: code,
+      reasonMessage: REASON_MESSAGES[code] ?? 'Forbidden',
+      details,
+    };
+
+    res.set({
+      'Content-Type': 'application/json; charset=utf-8',
+      'X-Paylink-Protocol': '403-v1',
+    });
+    res.status(403).json(body);
+  }
+}
+
+/**
+ * Create and start a paylink server
+ */
+export function createServer(config: PaylinkConfig): PaylinkServer {
+  return new PaylinkServer(config);
+}

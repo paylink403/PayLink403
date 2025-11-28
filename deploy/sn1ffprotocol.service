@@ -1,0 +1,14 @@
+[Unit]
+Description=Sn1ff Protocol Paylink Server
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/var/www/sn1ffprotocol
+ExecStart=/usr/bin/node dist-server/index.js
+Restart=on-failure
+EnvironmentFile=/var/www/sn1ffprotocol/.env
+
+[Install]
+WantedBy=multi-user.target

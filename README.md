@@ -262,7 +262,3 @@ const server = createServer({
 ```
 
 Mock chain auto-confirms all payments.
-
-## License
-
-MIT

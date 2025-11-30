@@ -147,6 +147,23 @@ interface WebhookConfigType {
     retries?: number;
 }
 /**
+ * PAYLINK token configuration
+ */
+interface PaylinkTokenConfigType {
+    /** Enable PAYLINK token payments */
+    enabled?: boolean;
+    /** Discount when paying with PAYLINK token (percentage, 0-100) */
+    paymentDiscount?: number;
+    /** Enable holder discounts based on PAYLINK balance */
+    holderDiscounts?: boolean;
+    /** Custom discount tiers */
+    discountTiers?: Array<{
+        minBalance: number;
+        discountPercent: number;
+        name: string;
+    }>;
+}
+/**
  * Server configuration
  */
 interface PaylinkConfig {
@@ -168,6 +185,8 @@ interface PaylinkConfig {
     cors?: boolean;
     /** Webhook configuration */
     webhook?: WebhookConfigType;
+    /** PAYLINK token configuration */
+    paylinkToken?: PaylinkTokenConfigType;
 }
 /**
  * Payment check result
@@ -598,6 +617,127 @@ declare function verifyWebhookSignature(body: string, signature: string, secret:
 declare function createWebhookManager(config: WebhookConfig): WebhookManager;
 
 /**
+ * PAYLINK Token Integration
+ * Native token support for Paylink Protocol
+ *
+ * Token: PAYLINK
+ * Mint: cMNjNj2NMaEniE37KvyV2GCyQJnbY8YDeANBhSMpump
+ * Chain: Solana
+ * Decimals: 6 (standard pump.fun token)
+ */
+
+/**
+ * PAYLINK Token Constants
+ */
+declare const PAYLINK_TOKEN: {
+    /** Token mint address */
+    readonly MINT: "cMNjNj2NMaEniE37KvyV2GCyQJnbY8YDeANBhSMpump";
+    /** Token symbol */
+    readonly SYMBOL: "PAYLINK";
+    /** Token decimals (pump.fun standard) */
+    readonly DECIMALS: 6;
+    /** Chain ID (Solana mainnet) */
+    readonly CHAIN_ID: 101;
+};
+/**
+ * Discount tiers based on PAYLINK holdings
+ */
+interface DiscountTier {
+    /** Minimum token balance required */
+    minBalance: number;
+    /** Discount percentage (0-100) */
+    discountPercent: number;
+    /** Tier name */
+    name: string;
+}
+/**
+ * Default discount tiers
+ */
+declare const DEFAULT_DISCOUNT_TIERS: DiscountTier[];
+/**
+ * PAYLINK configuration
+ */
+interface PaylinkTokenConfig {
+    /** Solana RPC URL */
+    rpcUrl: string;
+    /** Enable PAYLINK token payments */
+    enableTokenPayments?: boolean;
+    /** Discount when paying with PAYLINK (percentage, 0-100) */
+    tokenPaymentDiscount?: number;
+    /** Enable holder discounts */
+    enableHolderDiscounts?: boolean;
+    /** Custom discount tiers (optional) */
+    discountTiers?: DiscountTier[];
+    /** Request timeout in ms */
+    timeout?: number;
+}
+/**
+ * PAYLINK Token Manager
+ * Handles token balance checks, discounts, and SPL token payment verification
+ */
+declare class PaylinkTokenManager {
+    private config;
+    private requestId;
+    constructor(config: PaylinkTokenConfig);
+    /**
+     * Get PAYLINK token balance for a wallet
+     */
+    getTokenBalance(walletAddress: string): Promise<number>;
+    /**
+     * Get discount tier for a wallet based on PAYLINK holdings
+     */
+    getDiscountTier(walletAddress: string): Promise<DiscountTier | null>;
+    /**
+     * Calculate discounted price based on holder tier
+     */
+    calculateDiscountedPrice(walletAddress: string, originalPrice: number): Promise<{
+        price: number;
+        discount: number;
+        tier: DiscountTier | null;
+    }>;
+    /**
+     * Get price when paying with PAYLINK token
+     */
+    getTokenPaymentPrice(originalPrice: number): number;
+    /**
+     * Verify PAYLINK token payment
+     */
+    verifyTokenPayment(params: {
+        txHash: string;
+        recipient: string;
+        amount: string;
+    }): Promise<PaymentCheckResult>;
+    /**
+     * Parse SPL token transfer from transaction
+     */
+    private parseTokenTransfer;
+    /**
+     * Get token accounts for a wallet
+     */
+    private getTokenAccountsByOwner;
+    /**
+     * Get transaction details
+     */
+    private getTransaction;
+    /**
+     * Make RPC call
+     */
+    private rpc;
+}
+/**
+ * Create a PAYLINK token manager
+ */
+declare function createPaylinkTokenManager(config: PaylinkTokenConfig): PaylinkTokenManager;
+/**
+ * Check if a token symbol is PAYLINK
+ */
+declare function isPaylinkToken(symbol: string): boolean;
+/**
+ * Format PAYLINK amount for display
+ */
+declare function formatPaylinkAmount(amount: number): string;
+
+/**
  * Generate short unique ID
  */
 declare function generateId(length?: number): string;
@@ -630,4 +770,4 @@ declare function compareAmounts(a: string, b: string): number;
  */
 declare const REASON_MESSAGES: Record<string, string>;
 
-export { type ChainConfig, type ChainType, ChainVerifier, type CreatePayLinkInput, MemoryStorage, MockSolanaVerifier, MockVerifier, type PayLink, type PayLinkStatus, type PaylinkConfig, PaylinkServer, type Payment, type PaymentCheckResult, type PaymentQRData, type PaymentStatus, type Price, type Protocol402Response, type Protocol403Response, type QRCodeOptions, REASON_MESSAGES, ReasonCode, SOLANA_CHAIN_IDS, type SolanaConfig, SolanaVerifier, type Storage, type WebhookConfig, type WebhookConfigType, type WebhookEvent, type WebhookLinkData, WebhookManager, type WebhookPayload, type WebhookPaymentData, type WebhookResult, compareAmounts, createServer, createSolanaVerifier, createWebhookManager, generateId, generateNonce, generatePaymentQR, generatePaymentURI, generateQRCodeDataURL, generateQRCodeSVG, generateUUID, isExpired, isLimitReached, sign, verifyWebhookSignature };
+export { type ChainConfig, type ChainType, ChainVerifier, type CreatePayLinkInput, DEFAULT_DISCOUNT_TIERS, type DiscountTier, MemoryStorage, MockSolanaVerifier, MockVerifier, PAYLINK_TOKEN, type PayLink, type PayLinkStatus, type PaylinkConfig, PaylinkServer, type PaylinkTokenConfig, PaylinkTokenManager, type Payment, type PaymentCheckResult, type PaymentQRData, type PaymentStatus, type Price, type Protocol402Response, type Protocol403Response, type QRCodeOptions, REASON_MESSAGES, ReasonCode, SOLANA_CHAIN_IDS, type SolanaConfig, SolanaVerifier, type Storage, type WebhookConfig, type WebhookConfigType, type WebhookEvent, type WebhookLinkData, WebhookManager, type WebhookPayload, type WebhookPaymentData, type WebhookResult, compareAmounts, createPaylinkTokenManager, createServer, createSolanaVerifier, createWebhookManager, formatPaylinkAmount, generateId, generateNonce, generatePaymentQR, generatePaymentURI, generateQRCodeDataURL, generateQRCodeSVG, generateUUID, isExpired, isLimitReached, isPaylinkToken, sign, verifyWebhookSignature };

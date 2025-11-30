@@ -1019,7 +1019,8 @@ var PaylinkServer = class {
       signatureSecret: config.signatureSecret ?? "",
       apiKey: config.apiKey ?? "",
       cors: config.cors ?? true,
-      webhook: config.webhook
+      webhook: config.webhook,
+      paylinkToken: config.paylinkToken
     };
     this.storage = new MemoryStorage();
     this.verifiers = /* @__PURE__ */ new Map();
@@ -1577,21 +1578,279 @@ var PaylinkServer = class {
 function createServer(config) {
   return new PaylinkServer(config);
 }
+
+// lib/paylink-token.ts
+var PAYLINK_TOKEN = {
+  /** Token mint address */
+  MINT: "cMNjNj2NMaEniE37KvyV2GCyQJnbY8YDeANBhSMpump",
+  /** Token symbol */
+  SYMBOL: "PAYLINK",
+  /** Token decimals (pump.fun standard) */
+  DECIMALS: 6,
+  /** Chain ID (Solana mainnet) */
+  CHAIN_ID: 101
+};
+var DEFAULT_DISCOUNT_TIERS = [
+  { minBalance: 1e6, discountPercent: 50, name: "Diamond" },
+  // 1M tokens = 50% off
+  { minBalance: 5e5, discountPercent: 30, name: "Platinum" },
+  // 500K tokens = 30% off
+  { minBalance: 1e5, discountPercent: 20, name: "Gold" },
+  // 100K tokens = 20% off
+  { minBalance: 1e4, discountPercent: 10, name: "Silver" },
+  // 10K tokens = 10% off
+  { minBalance: 1e3, discountPercent: 5, name: "Bronze" }
+  // 1K tokens = 5% off
+];
+var PaylinkTokenManager = class {
+  config;
+  requestId = 0;
+  constructor(config) {
+    this.config = {
+      rpcUrl: config.rpcUrl,
+      enableTokenPayments: config.enableTokenPayments ?? true,
+      tokenPaymentDiscount: config.tokenPaymentDiscount ?? 10,
+      enableHolderDiscounts: config.enableHolderDiscounts ?? true,
+      discountTiers: config.discountTiers ?? DEFAULT_DISCOUNT_TIERS,
+      timeout: config.timeout ?? 3e4
+    };
+  }
+  /**
+   * Get PAYLINK token balance for a wallet
+   */
+  async getTokenBalance(walletAddress) {
+    try {
+      const tokenAccounts = await this.getTokenAccountsByOwner(walletAddress);
+      const paylinkAccount = tokenAccounts.find(
+        (acc) => acc.mint === PAYLINK_TOKEN.MINT
+      );
+      if (!paylinkAccount) {
+        return 0;
+      }
+      return Number(paylinkAccount.amount) / Math.pow(10, PAYLINK_TOKEN.DECIMALS);
+    } catch (error) {
+      console.error("Error fetching PAYLINK balance:", error);
+      return 0;
+    }
+  }
+  /**
+   * Get discount tier for a wallet based on PAYLINK holdings
+   */
+  async getDiscountTier(walletAddress) {
+    if (!this.config.enableHolderDiscounts) {
+      return null;
+    }
+    const balance = await this.getTokenBalance(walletAddress);
+    const sortedTiers = [...this.config.discountTiers].sort(
+      (a, b) => b.minBalance - a.minBalance
+    );
+    for (const tier of sortedTiers) {
+      if (balance >= tier.minBalance) {
+        return tier;
+      }
+    }
+    return null;
+  }
+  /**
+   * Calculate discounted price based on holder tier
+   */
+  async calculateDiscountedPrice(walletAddress, originalPrice) {
+    const tier = await this.getDiscountTier(walletAddress);
+    if (!tier) {
+      return { price: originalPrice, discount: 0, tier: null };
+    }
+    const discount = originalPrice * tier.discountPercent / 100;
+    const price = originalPrice - discount;
+    return { price, discount, tier };
+  }
+  /**
+   * Get price when paying with PAYLINK token
+   */
+  getTokenPaymentPrice(originalPrice) {
+    if (!this.config.enableTokenPayments) {
+      return originalPrice;
+    }
+    const discount = originalPrice * this.config.tokenPaymentDiscount / 100;
+    return originalPrice - discount;
+  }
+  /**
+   * Verify PAYLINK token payment
+   */
+  async verifyTokenPayment(params) {
+    try {
+      const tx = await this.getTransaction(params.txHash);
+      if (!tx) {
+        return { status: "not_found" };
+      }
+      if (tx.meta?.err) {
+        return { status: "failed" };
+      }
+      const transfer = this.parseTokenTransfer(tx, params.recipient);
+      if (!transfer) {
+        return { status: "not_found" };
+      }
+      if (transfer.mint !== PAYLINK_TOKEN.MINT) {
+        return { status: "not_found" };
+      }
+      const actualAmount = transfer.amount / Math.pow(10, PAYLINK_TOKEN.DECIMALS);
+      const requiredAmount = parseFloat(params.amount);
+      if (actualAmount < requiredAmount) {
+        return {
+          status: "underpaid",
+          actualAmount: actualAmount.toString(),
+          fromAddress: transfer.from
+        };
+      }
+      return {
+        status: "confirmed",
+        actualAmount: actualAmount.toString(),
+        fromAddress: transfer.from,
+        raw: tx
+      };
+    } catch (error) {
+      console.error("PAYLINK payment verification error:", error);
+      return { status: "not_found" };
+    }
+  }
+  /**
+   * Parse SPL token transfer from transaction
+   */
+  parseTokenTransfer(tx, expectedRecipient) {
+    try {
+      const preBalances = tx.meta?.preTokenBalances || [];
+      const postBalances = tx.meta?.postTokenBalances || [];
+      for (const post of postBalances) {
+        if (post.mint !== PAYLINK_TOKEN.MINT) continue;
+        const pre = preBalances.find(
+          (p) => p.accountIndex === post.accountIndex
+        );
+        const preAmount = pre ? Number(pre.uiTokenAmount?.amount || 0) : 0;
+        const postAmount = Number(post.uiTokenAmount?.amount || 0);
+        const diff = postAmount - preAmount;
+        if (diff > 0) {
+          const owner = post.owner;
+          if (owner?.toLowerCase() === expectedRecipient.toLowerCase()) {
+            let sender = "";
+            for (const otherPost of postBalances) {
+              if (otherPost.mint !== PAYLINK_TOKEN.MINT) continue;
+              const otherPre = preBalances.find(
+                (p) => p.accountIndex === otherPost.accountIndex
+              );
+              const otherPreAmount = otherPre ? Number(otherPre.uiTokenAmount?.amount || 0) : 0;
+              const otherPostAmount = Number(otherPost.uiTokenAmount?.amount || 0);
+              if (otherPostAmount - otherPreAmount < 0) {
+                sender = otherPost.owner || "";
+                break;
+              }
+            }
+            return {
+              mint: PAYLINK_TOKEN.MINT,
+              from: sender,
+              to: owner,
+              amount: diff
+            };
+          }
+        }
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+  /**
+   * Get token accounts for a wallet
+   */
+  async getTokenAccountsByOwner(owner) {
+    const result = await this.rpc("getTokenAccountsByOwner", [
+      owner,
+      { programId: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" },
+      { encoding: "jsonParsed" }
+    ]);
+    if (!result?.value) {
+      return [];
+    }
+    return result.value.map((item) => item.account.data.parsed.info);
+  }
+  /**
+   * Get transaction details
+   */
+  async getTransaction(signature) {
+    return this.rpc("getTransaction", [
+      signature,
+      {
+        encoding: "jsonParsed",
+        commitment: "confirmed",
+        maxSupportedTransactionVersion: 0
+      }
+    ]);
+  }
+  /**
+   * Make RPC call
+   */
+  async rpc(method, params) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.config.timeout);
+    try {
+      const response = await fetch(this.config.rpcUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: ++this.requestId,
+          method,
+          params
+        }),
+        signal: controller.signal
+      });
+      const data = await response.json();
+      if (data.error) {
+        console.error("RPC error:", data.error);
+        return null;
+      }
+      return data.result ?? null;
+    } catch (error) {
+      console.error("RPC request failed:", error);
+      return null;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+};
+function createPaylinkTokenManager(config) {
+  return new PaylinkTokenManager(config);
+}
+function isPaylinkToken(symbol) {
+  return symbol.toUpperCase() === PAYLINK_TOKEN.SYMBOL;
+}
+function formatPaylinkAmount(amount) {
+  if (amount >= 1e6) {
+    return `${(amount / 1e6).toFixed(2)}M`;
+  }
+  if (amount >= 1e3) {
+    return `${(amount / 1e3).toFixed(2)}K`;
+  }
+  return amount.toFixed(2);
+}
 export {
   ChainVerifier,
+  DEFAULT_DISCOUNT_TIERS,
   MemoryStorage,
   MockSolanaVerifier,
   MockVerifier,
+  PAYLINK_TOKEN,
   PaylinkServer,
+  PaylinkTokenManager,
   REASON_MESSAGES,
   ReasonCode,
   SOLANA_CHAIN_IDS,
   SolanaVerifier,
   WebhookManager,
   compareAmounts,
+  createPaylinkTokenManager,
   createServer,
   createSolanaVerifier,
   createWebhookManager,
+  formatPaylinkAmount,
   generateId,
   generateNonce,
   generatePaymentQR,
@@ -1601,6 +1860,7 @@ export {
   generateUUID,
   isExpired,
   isLimitReached,
+  isPaylinkToken,
   sign,
   verifyWebhookSignature
 };

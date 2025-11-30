@@ -165,6 +165,24 @@ export interface WebhookConfigType {
 }
 
 /**
+ * PAYLINK token configuration
+ */
+export interface PaylinkTokenConfigType {
+  /** Enable PAYLINK token payments */
+  enabled?: boolean;
+  /** Discount when paying with PAYLINK token (percentage, 0-100) */
+  paymentDiscount?: number;
+  /** Enable holder discounts based on PAYLINK balance */
+  holderDiscounts?: boolean;
+  /** Custom discount tiers */
+  discountTiers?: Array<{
+    minBalance: number;
+    discountPercent: number;
+    name: string;
+  }>;
+}
+
+/**
  * Server configuration
  */
 export interface PaylinkConfig {
@@ -186,6 +204,8 @@ export interface PaylinkConfig {
   cors?: boolean;
   /** Webhook configuration */
   webhook?: WebhookConfigType;
+  /** PAYLINK token configuration */
+  paylinkToken?: PaylinkTokenConfigType;
 }
 
 /**

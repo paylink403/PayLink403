@@ -55,6 +55,20 @@ export type {
   WebhookLinkData,
 } from './webhook.js';
 
+// PAYLINK Token
+export {
+  PaylinkTokenManager,
+  createPaylinkTokenManager,
+  isPaylinkToken,
+  formatPaylinkAmount,
+  PAYLINK_TOKEN,
+  DEFAULT_DISCOUNT_TIERS,
+} from './paylink-token.js';
+export type {
+  PaylinkTokenConfig,
+  DiscountTier,
+} from './paylink-token.js';
+
 // Utils
 export {
   generateId,

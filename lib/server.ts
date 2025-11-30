@@ -35,9 +35,10 @@ type Verifier = ChainVerifier | MockVerifier | SolanaVerifier | MockSolanaVerifi
  */
 export class PaylinkServer {
   private app: Express;
-  private config: Required<Omit<PaylinkConfig, 'chains' | 'webhook'>> & { 
+  private config: Required<Omit<PaylinkConfig, 'chains' | 'webhook' | 'paylinkToken'>> & { 
     chains: PaylinkConfig['chains'];
     webhook?: PaylinkConfig['webhook'];
+    paylinkToken?: PaylinkConfig['paylinkToken'];
   };
   private storage: Storage;
   private verifiers: Map<number, Verifier>;
@@ -55,6 +56,7 @@ export class PaylinkServer {
       apiKey: config.apiKey ?? '',
       cors: config.cors ?? true,
       webhook: config.webhook,
+      paylinkToken: config.paylinkToken,
     };
 
     this.storage = new MemoryStorage();

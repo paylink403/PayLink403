@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.0] - 2024-11-30
+
+### Added
+
+- **PAYLINK Token Integration**: Native support for PAYLINK token (cMNjNj2NMaEniE37KvyV2GCyQJnbY8YDeANBhSMpump)
+  - SPL token payment verification
+  - Holder discount tiers (Bronze 5% → Diamond 50%)
+  - Payment discount when using PAYLINK token
+  - `PaylinkTokenManager` class for balance checks and discounts
+  - Helper functions: `isPaylinkToken()`, `formatPaylinkAmount()`
+
+### New Exports
+
+- `PAYLINK_TOKEN` - Token constants (mint address, decimals, symbol)
+- `DEFAULT_DISCOUNT_TIERS` - Default holder discount tiers
+- `PaylinkTokenManager` - Token management class
+- `createPaylinkTokenManager()` - Factory function
+- `PaylinkTokenConfig` type
+
 ## [1.1.0] - 2024-11-30
 
 ### Added

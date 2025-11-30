@@ -9,6 +9,11 @@ export type PayLinkStatus = 'active' | 'disabled' | 'expired';
 export type PaymentStatus = 'not_found' | 'pending' | 'confirmed' | 'failed' | 'underpaid';
 
 /**
+ * Chain type
+ */
+export type ChainType = 'evm' | 'solana';
+
+/**
  * Supported chain configuration
  */
 export interface ChainConfig {
@@ -17,7 +22,19 @@ export interface ChainConfig {
   rpcUrl: string;
   symbol: string;
   confirmations?: number;
+  /** Chain type (default: 'evm') */
+  type?: ChainType;
 }
+
+/**
+ * Solana chain IDs
+ * 101 = Mainnet, 102 = Devnet, 103 = Testnet
+ */
+export const SOLANA_CHAIN_IDS = {
+  MAINNET: 101,
+  DEVNET: 102,
+  TESTNET: 103,
+} as const;
 
 /**
  * Price configuration
@@ -125,6 +142,29 @@ export interface Protocol403Response {
 }
 
 /**
+ * Webhook configuration
+ */
+export interface WebhookConfigType {
+  /** Webhook URL to send events to */
+  url: string;
+  /** Secret for HMAC signature */
+  secret?: string;
+  /** Events to send */
+  events?: Array<
+    | 'payment.confirmed'
+    | 'payment.pending'
+    | 'payment.failed'
+    | 'payment.underpaid'
+    | 'link.created'
+    | 'link.disabled'
+  >;
+  /** Request timeout in ms */
+  timeout?: number;
+  /** Retry count on failure */
+  retries?: number;
+}
+
+/**
  * Server configuration
  */
 export interface PaylinkConfig {
@@ -144,6 +184,8 @@ export interface PaylinkConfig {
   apiKey?: string;
   /** Enable CORS (default: true) */
   cors?: boolean;
+  /** Webhook configuration */
+  webhook?: WebhookConfigType;
 }
 
 /**

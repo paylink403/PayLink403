@@ -1,7 +1,7 @@
 {
   "name": "@paylinkprotocol/paylink",
-  "version": "1.0.0",
-  "description": "Self-hosted paid links with 402/403 protocol support for blockchain payments",
+  "version": "1.1.0",
+  "description": "Self-hosted paid links with 402/403 protocol support for blockchain payments. Supports EVM chains and Solana with QR codes and webhooks.",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
@@ -34,8 +34,12 @@
     "crypto",
     "paid-links",
     "ethereum",
+    "solana",
     "web3",
-    "self-hosted"
+    "self-hosted",
+    "qrcode",
+    "webhooks",
+    "payment-gateway"
   ],
   "author": "",
   "license": "MIT",

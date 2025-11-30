@@ -9,6 +9,10 @@ type PayLinkStatus = 'active' | 'disabled' | 'expired';
  */
 type PaymentStatus = 'not_found' | 'pending' | 'confirmed' | 'failed' | 'underpaid';
 /**
+ * Chain type
+ */
+type ChainType = 'evm' | 'solana';
+/**
  * Supported chain configuration
  */
 interface ChainConfig {
@@ -17,7 +21,18 @@ interface ChainConfig {
     rpcUrl: string;
     symbol: string;
     confirmations?: number;
+    /** Chain type (default: 'evm') */
+    type?: ChainType;
 }
+/**
+ * Solana chain IDs
+ * 101 = Mainnet, 102 = Devnet, 103 = Testnet
+ */
+declare const SOLANA_CHAIN_IDS: {
+    readonly MAINNET: 101;
+    readonly DEVNET: 102;
+    readonly TESTNET: 103;
+};
 /**
  * Price configuration
  */
@@ -117,6 +132,21 @@ interface Protocol403Response {
     details?: Record<string, unknown>;
 }
 /**
+ * Webhook configuration
+ */
+interface WebhookConfigType {
+    /** Webhook URL to send events to */
+    url: string;
+    /** Secret for HMAC signature */
+    secret?: string;
+    /** Events to send */
+    events?: Array<'payment.confirmed' | 'payment.pending' | 'payment.failed' | 'payment.underpaid' | 'link.created' | 'link.disabled'>;
+    /** Request timeout in ms */
+    timeout?: number;
+    /** Retry count on failure */
+    retries?: number;
+}
+/**
  * Server configuration
  */
 interface PaylinkConfig {
@@ -136,6 +166,8 @@ interface PaylinkConfig {
     apiKey?: string;
     /** Enable CORS (default: true) */
     cors?: boolean;
+    /** Webhook configuration */
+    webhook?: WebhookConfigType;
 }
 /**
  * Payment check result
@@ -170,7 +202,16 @@ declare class PaylinkServer {
     private config;
     private storage;
     private verifiers;
+    private webhookManager?;
     constructor(config: PaylinkConfig);
+    /**
+     * Create appropriate verifier based on chain type
+     */
+    private createVerifier;
+    /**
+     * Check if chain ID is a Solana chain
+     */
+    private isSolanaChainId;
     /**
      * Get Express app instance
      */
@@ -205,6 +246,10 @@ declare class PaylinkServer {
     private handlePayLink;
     private handleStatus;
     private handleConfirm;
+    /**
+     * Handle QR code generation
+     */
+    private handleQRCode;
     private apiCreateLink;
     private apiListLinks;
     private apiGetLink;
@@ -279,6 +324,280 @@ declare class MockVerifier {
 }
 
 /**
+ * Solana chain configuration
+ */
+interface SolanaConfig {
+    /** RPC URL (e.g., https://api.mainnet-beta.solana.com) */
+    rpcUrl: string;
+    /** Number of confirmations required (default: 1) */
+    confirmations?: number;
+    /** Request timeout in ms (default: 30000) */
+    timeout?: number;
+}
+/**
+ * Solana Payment Verifier
+ * Verifies native SOL transfers on Solana blockchain
+ */
+declare class SolanaVerifier {
+    private config;
+    private requestId;
+    constructor(config: SolanaConfig);
+    /**
+     * Verify a Solana payment
+     */
+    verifyPayment(params: {
+        txHash: string;
+        recipient: string;
+        amount: string;
+    }): Promise<PaymentCheckResult>;
+    /**
+     * Parse a Solana transaction to extract transfer details
+     */
+    private parseTransfer;
+    /**
+     * Get transaction details from Solana RPC
+     */
+    private getTransaction;
+    /**
+     * Get signature status
+     */
+    private getSignatureStatus;
+    /**
+     * Make an RPC call to Solana
+     */
+    private rpc;
+}
+/**
+ * Mock Solana verifier for testing
+ */
+declare class MockSolanaVerifier {
+    private confirmed;
+    private pending;
+    private failed;
+    markConfirmed(signature: string): void;
+    markPending(signature: string): void;
+    markFailed(signature: string): void;
+    verifyPayment(params: {
+        txHash: string;
+        recipient: string;
+        amount: string;
+    }): Promise<PaymentCheckResult>;
+}
+/**
+ * Create a Solana verifier
+ */
+declare function createSolanaVerifier(config: SolanaConfig): SolanaVerifier;
+
+/**
+ * QR Code Generator
+ * Generates QR codes for payment links with wallet deep links
+ */
+/**
+ * QR Code options
+ */
+interface QRCodeOptions {
+    /** Size in pixels (default: 256) */
+    size?: number;
+    /** Margin in modules (default: 4) */
+    margin?: number;
+    /** Dark color (default: #000000) */
+    darkColor?: string;
+    /** Light color (default: #ffffff) */
+    lightColor?: string;
+    /** Output format */
+    format?: 'svg' | 'png-base64';
+}
+/**
+ * Payment QR data
+ */
+interface PaymentQRData {
+    /** Chain ID */
+    chainId: number;
+    /** Recipient address */
+    recipient: string;
+    /** Amount to pay */
+    amount: string;
+    /** Token symbol */
+    tokenSymbol: string;
+    /** Payment link ID */
+    payLinkId: string;
+    /** Callback URL for confirmation */
+    confirmUrl: string;
+}
+/**
+ * Generate a payment URI for wallets
+ */
+declare function generatePaymentURI(data: PaymentQRData): string;
+/**
+ * Generate QR code as SVG
+ */
+declare function generateQRCodeSVG(data: string, options?: QRCodeOptions): string;
+/**
+ * Generate QR code as data URL (base64 PNG simulation via SVG)
+ */
+declare function generateQRCodeDataURL(data: string, options?: QRCodeOptions): string;
+/**
+ * Generate complete payment QR code
+ */
+declare function generatePaymentQR(data: PaymentQRData, options?: QRCodeOptions): {
+    uri: string;
+    svg: string;
+    dataUrl: string;
+};
+
+/**
+ * Webhook configuration
+ */
+interface WebhookConfig {
+    /** Webhook URL to send events to */
+    url: string;
+    /** Secret for HMAC signature */
+    secret?: string;
+    /** Events to send (default: all) */
+    events?: WebhookEvent[];
+    /** Request timeout in ms (default: 10000) */
+    timeout?: number;
+    /** Retry count on failure (default: 3) */
+    retries?: number;
+    /** Custom headers to include */
+    headers?: Record<string, string>;
+}
+/**
+ * Webhook event types
+ */
+type WebhookEvent = 'payment.confirmed' | 'payment.pending' | 'payment.failed' | 'payment.underpaid' | 'link.created' | 'link.disabled' | 'link.expired';
+/**
+ * Webhook payload base
+ */
+interface WebhookPayload {
+    /** Event type */
+    event: WebhookEvent;
+    /** Event timestamp */
+    timestamp: string;
+    /** Unique event ID */
+    eventId: string;
+    /** Event data */
+    data: WebhookPaymentData | WebhookLinkData;
+}
+/**
+ * Payment event data
+ */
+interface WebhookPaymentData {
+    type: 'payment';
+    payment: {
+        id: string;
+        payLinkId: string;
+        chainId: number;
+        txHash: string;
+        fromAddress: string;
+        amount: string;
+        confirmed: boolean;
+        createdAt: string;
+        confirmedAt?: string;
+    };
+    payLink: {
+        id: string;
+        targetUrl: string;
+        price: {
+            amount: string;
+            tokenSymbol: string;
+            chainId: number;
+        };
+        recipientAddress: string;
+    };
+}
+/**
+ * Link event data
+ */
+interface WebhookLinkData {
+    type: 'link';
+    link: {
+        id: string;
+        targetUrl: string;
+        price: {
+            amount: string;
+            tokenSymbol: string;
+            chainId: number;
+        };
+        recipientAddress: string;
+        status: string;
+        createdAt: string;
+        description?: string;
+        maxUses?: number;
+        expiresAt?: string;
+    };
+}
+/**
+ * Webhook delivery result
+ */
+interface WebhookResult {
+    success: boolean;
+    statusCode?: number;
+    error?: string;
+    attempts: number;
+    duration: number;
+}
+/**
+ * Webhook Manager
+ * Handles sending webhook notifications for payment events
+ */
+declare class WebhookManager {
+    private config;
+    private queue;
+    private processing;
+    constructor(config: WebhookConfig);
+    /**
+     * Check if event type is enabled
+     */
+    isEventEnabled(event: WebhookEvent): boolean;
+    /**
+     * Send payment event
+     */
+    sendPaymentEvent(event: WebhookEvent, payment: Payment, payLink: PayLink): Promise<WebhookResult | null>;
+    /**
+     * Send link event
+     */
+    sendLinkEvent(event: WebhookEvent, payLink: PayLink): Promise<WebhookResult | null>;
+    /**
+     * Queue event for async delivery
+     */
+    queueEvent(payload: WebhookPayload): void;
+    /**
+     * Send webhook with retries
+     */
+    send(payload: WebhookPayload): Promise<WebhookResult>;
+    /**
+     * Deliver webhook
+     */
+    private deliver;
+    /**
+     * Sign payload with HMAC-SHA256
+     */
+    private sign;
+    /**
+     * Generate unique event ID
+     */
+    private generateEventId;
+    /**
+     * Process queued events
+     */
+    private processQueue;
+    /**
+     * Delay helper
+     */
+    private delay;
+}
+/**
+ * Verify webhook signature
+ * Use this in your webhook handler to verify authenticity
+ */
+declare function verifyWebhookSignature(body: string, signature: string, secret: string): boolean;
+/**
+ * Create a webhook manager
+ */
+declare function createWebhookManager(config: WebhookConfig): WebhookManager;
+
+/**
  * Generate short unique ID
  */
 declare function generateId(length?: number): string;
@@ -311,4 +630,4 @@ declare function compareAmounts(a: string, b: string): number;
  */
 declare const REASON_MESSAGES: Record<string, string>;
 
-export { type ChainConfig, ChainVerifier, type CreatePayLinkInput, MemoryStorage, MockVerifier, type PayLink, type PayLinkStatus, type PaylinkConfig, PaylinkServer, type Payment, type PaymentCheckResult, type PaymentStatus, type Price, type Protocol402Response, type Protocol403Response, REASON_MESSAGES, ReasonCode, type Storage, compareAmounts, createServer, generateId, generateNonce, generateUUID, isExpired, isLimitReached, sign };
+export { type ChainConfig, type ChainType, ChainVerifier, type CreatePayLinkInput, MemoryStorage, MockSolanaVerifier, MockVerifier, type PayLink, type PayLinkStatus, type PaylinkConfig, PaylinkServer, type Payment, type PaymentCheckResult, type PaymentQRData, type PaymentStatus, type Price, type Protocol402Response, type Protocol403Response, type QRCodeOptions, REASON_MESSAGES, ReasonCode, SOLANA_CHAIN_IDS, type SolanaConfig, SolanaVerifier, type Storage, type WebhookConfig, type WebhookConfigType, type WebhookEvent, type WebhookLinkData, WebhookManager, type WebhookPayload, type WebhookPaymentData, type WebhookResult, compareAmounts, createServer, createSolanaVerifier, createWebhookManager, generateId, generateNonce, generatePaymentQR, generatePaymentURI, generateQRCodeDataURL, generateQRCodeSVG, generateUUID, isExpired, isLimitReached, sign, verifyWebhookSignature };

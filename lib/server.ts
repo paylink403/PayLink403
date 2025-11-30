@@ -9,10 +9,14 @@ import type {
   Protocol402Response,
   Protocol403Response,
   Storage,
+  ChainConfig,
 } from './types.js';
-import { ReasonCode } from './types.js';
+import { ReasonCode, SOLANA_CHAIN_IDS } from './types.js';
 import { MemoryStorage } from './storage.js';
 import { ChainVerifier, MockVerifier } from './chain.js';
+import { SolanaVerifier, MockSolanaVerifier } from './providers/solana.js';
+import { WebhookManager } from './webhook.js';
+import { generatePaymentQR, generateQRCodeSVG, type PaymentQRData } from './qrcode.js';
 import {
   generateId,
   generateUUID,
@@ -23,15 +27,21 @@ import {
   REASON_MESSAGES,
 } from './utils.js';
 
+type Verifier = ChainVerifier | MockVerifier | SolanaVerifier | MockSolanaVerifier;
+
 /**
  * Paylink Server
  * Self-hosted paid links with blockchain payment verification
  */
 export class PaylinkServer {
   private app: Express;
-  private config: Required<Omit<PaylinkConfig, 'chains'>> & { chains: PaylinkConfig['chains'] };
+  private config: Required<Omit<PaylinkConfig, 'chains' | 'webhook'>> & { 
+    chains: PaylinkConfig['chains'];
+    webhook?: PaylinkConfig['webhook'];
+  };
   private storage: Storage;
-  private verifiers: Map<number, ChainVerifier | MockVerifier>;
+  private verifiers: Map<number, Verifier>;
+  private webhookManager?: WebhookManager;
 
   constructor(config: PaylinkConfig) {
     // Default config
@@ -44,23 +54,54 @@ export class PaylinkServer {
       signatureSecret: config.signatureSecret ?? '',
       apiKey: config.apiKey ?? '',
       cors: config.cors ?? true,
+      webhook: config.webhook,
     };
 
     this.storage = new MemoryStorage();
     this.verifiers = new Map();
 
+    // Initialize webhook manager
+    if (config.webhook?.url) {
+      this.webhookManager = new WebhookManager(config.webhook);
+    }
+
     // Initialize chain verifiers
     for (const chain of config.chains) {
-      if (chain.rpcUrl === 'mock') {
-        this.verifiers.set(chain.chainId, new MockVerifier());
-      } else {
-        this.verifiers.set(chain.chainId, new ChainVerifier(chain));
-      }
+      this.verifiers.set(chain.chainId, this.createVerifier(chain));
     }
 
     this.app = express();
     this.setupMiddleware();
     this.setupRoutes();
+  }
+
+  /**
+   * Create appropriate verifier based on chain type
+   */
+  private createVerifier(chain: ChainConfig): Verifier {
+    const isSolana = chain.type === 'solana' || this.isSolanaChainId(chain.chainId);
+    
+    if (chain.rpcUrl === 'mock') {
+      return isSolana ? new MockSolanaVerifier() : new MockVerifier();
+    }
+    
+    if (isSolana) {
+      return new SolanaVerifier({
+        rpcUrl: chain.rpcUrl,
+        confirmations: chain.confirmations,
+      });
+    }
+    
+    return new ChainVerifier(chain);
+  }
+
+  /**
+   * Check if chain ID is a Solana chain
+   */
+  private isSolanaChainId(chainId: number): boolean {
+    return chainId === SOLANA_CHAIN_IDS.MAINNET ||
+           chainId === SOLANA_CHAIN_IDS.DEVNET ||
+           chainId === SOLANA_CHAIN_IDS.TESTNET;
   }
 
   /**
@@ -91,17 +132,21 @@ export class PaylinkServer {
     this.app.listen(this.config.port, () => {
       console.log('');
       console.log('╔══════════════════════════════════════════════════════════╗');
-      console.log('║              Paylink Protocol Server                     ║');
+      console.log('║              Paylink Protocol Server v1.1.0              ║');
       console.log('╠══════════════════════════════════════════════════════════╣');
       console.log(`║  Port:     ${String(this.config.port).padEnd(44)}║`);
       console.log(`║  Base URL: ${(this.config.baseUrl || 'http://localhost:' + this.config.port).padEnd(44)}║`);
       console.log(`║  Chains:   ${this.config.chains.map(c => c.name).join(', ').padEnd(44)}║`);
+      if (this.webhookManager) {
+        console.log(`║  Webhook:  ${this.config.webhook?.url?.substring(0, 44).padEnd(44)}║`);
+      }
       console.log('╚══════════════════════════════════════════════════════════╝');
       console.log('');
       console.log('Endpoints:');
       console.log(`  GET  ${this.config.basePath}/:id          → Payment page (402/403/302)`);
       console.log(`  GET  ${this.config.basePath}/:id/status   → Check payment status`);
       console.log(`  POST ${this.config.basePath}/:id/confirm  → Confirm with txHash`);
+      console.log(`  GET  ${this.config.basePath}/:id/qr       → QR code for payment`);
       console.log('');
       if (this.config.apiKey) {
         console.log('Admin API (X-API-Key header required):');
@@ -141,6 +186,14 @@ export class PaylinkServer {
     };
 
     await this.storage.savePayLink(payLink);
+
+    // Send webhook notification
+    if (this.webhookManager) {
+      this.webhookManager.sendLinkEvent('link.created', payLink).catch(err => {
+        console.error('Webhook error:', err);
+      });
+    }
+
     return payLink;
   }
 
@@ -160,6 +213,13 @@ export class PaylinkServer {
     
     link.status = 'disabled';
     await this.storage.updatePayLink(link);
+
+    // Send webhook notification
+    if (this.webhookManager) {
+      this.webhookManager.sendLinkEvent('link.disabled', link).catch(err => {
+        console.error('Webhook error:', err);
+      });
+    }
   }
 
   // ========================================
@@ -211,6 +271,7 @@ export class PaylinkServer {
     this.app.get(`${this.config.basePath}/:id`, this.handlePayLink.bind(this));
     this.app.get(`${this.config.basePath}/:id/status`, this.handleStatus.bind(this));
     this.app.post(`${this.config.basePath}/:id/confirm`, this.handleConfirm.bind(this));
+    this.app.get(`${this.config.basePath}/:id/qr`, this.handleQRCode.bind(this));
 
     // Admin API
     if (this.config.apiKey) {
@@ -365,13 +426,53 @@ export class PaylinkServer {
             confirmedAt: new Date(),
           };
           await this.storage.savePayment(payment);
+          
+          // Send webhook notification
+          if (this.webhookManager) {
+            this.webhookManager.sendPaymentEvent('payment.confirmed', payment, link).catch(err => {
+              console.error('Webhook error:', err);
+            });
+          }
+          
           res.json({ status: 'confirmed' });
           break;
         }
         case 'pending':
+          // Send webhook for pending payment
+          if (this.webhookManager) {
+            const pendingPayment: Payment = {
+              id: generateUUID(),
+              payLinkId: link.id,
+              chainId: link.price.chainId,
+              txHash,
+              fromAddress: result.fromAddress ?? '',
+              amount: result.actualAmount ?? link.price.amount,
+              confirmed: false,
+              createdAt: new Date(),
+            };
+            this.webhookManager.sendPaymentEvent('payment.pending', pendingPayment, link).catch(err => {
+              console.error('Webhook error:', err);
+            });
+          }
           res.status(202).json({ status: 'pending', message: 'Transaction pending' });
           break;
         case 'underpaid':
+          // Send webhook for underpaid
+          if (this.webhookManager) {
+            const underpaidPayment: Payment = {
+              id: generateUUID(),
+              payLinkId: link.id,
+              chainId: link.price.chainId,
+              txHash,
+              fromAddress: result.fromAddress ?? '',
+              amount: result.actualAmount ?? '0',
+              confirmed: false,
+              createdAt: new Date(),
+            };
+            this.webhookManager.sendPaymentEvent('payment.underpaid', underpaidPayment, link).catch(err => {
+              console.error('Webhook error:', err);
+            });
+          }
           res.status(400).json({
             status: 'failed',
             message: `Underpaid: received ${result.actualAmount}, required ${link.price.amount}`,
@@ -382,6 +483,65 @@ export class PaylinkServer {
       }
     } catch (error) {
       console.error('Confirm error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+
+  /**
+   * Handle QR code generation
+   */
+  private async handleQRCode(req: Request, res: Response): Promise<void> {
+    try {
+      const link = await this.storage.getPayLink(req.params.id);
+
+      if (!link) {
+        res.status(404).json({ error: 'Payment link not found' });
+        return;
+      }
+
+      if (link.status !== 'active') {
+        res.status(403).json({ error: 'Payment link is not active' });
+        return;
+      }
+
+      const base = this.config.baseUrl || `http://localhost:${this.config.port}`;
+      const format = req.query.format as string || 'svg';
+      const size = parseInt(req.query.size as string) || 256;
+
+      const qrData: PaymentQRData = {
+        chainId: link.price.chainId,
+        recipient: link.recipientAddress,
+        amount: link.price.amount,
+        tokenSymbol: link.price.tokenSymbol,
+        payLinkId: link.id,
+        confirmUrl: `${base}${this.config.basePath}/${link.id}/confirm`,
+      };
+
+      const qr = generatePaymentQR(qrData, { size });
+
+      if (format === 'json') {
+        res.json({
+          payLinkId: link.id,
+          paymentUri: qr.uri,
+          qrCodeDataUrl: qr.dataUrl,
+          payment: {
+            chainId: link.price.chainId,
+            tokenSymbol: link.price.tokenSymbol,
+            amount: link.price.amount,
+            recipient: link.recipientAddress,
+          },
+        });
+        return;
+      }
+
+      // Return SVG directly
+      res.set({
+        'Content-Type': 'image/svg+xml',
+        'Cache-Control': 'public, max-age=300',
+      });
+      res.send(qr.svg);
+    } catch (error) {
+      console.error('QR code error:', error);
       res.status(500).json({ error: 'Internal server error' });
     }
   }

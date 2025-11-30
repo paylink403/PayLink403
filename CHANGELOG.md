@@ -2,6 +2,58 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.0] - 2024-11-30
+
+### Added
+
+- **Subscriptions**: Recurring payment support with flexible billing
+  - New subscription link type with configurable intervals (daily, weekly, monthly, yearly)
+  - Grace periods for late payments
+  - Trial period support
+  - Maximum billing cycles limit
+  - Automatic past-due detection
+
+- **Subscription Endpoints**:
+  - `POST /pay/:id/subscribe` - Create or renew subscription
+  - `GET /pay/:id/subscription?subscriber=ADDRESS` - Check subscription status
+  - `GET /api/subscriptions` - List all subscriptions (admin)
+  - `GET /api/subscriptions/:id` - Get subscription details (admin)
+  - `POST /api/subscriptions/:id/cancel` - Cancel subscription (admin)
+  - `POST /api/subscriptions/:id/pause` - Pause subscription (admin)
+  - `POST /api/subscriptions/:id/resume` - Resume subscription (admin)
+
+- **Subscription Webhooks**:
+  - `subscription.created` - New subscription created
+  - `subscription.renewed` - Payment received, subscription renewed
+  - `subscription.cancelled` - Subscription cancelled
+  - `subscription.paused` - Subscription paused
+  - `subscription.resumed` - Subscription resumed from pause
+  - `subscription.past_due` - Payment past grace period
+  - `subscription.payment_due` - Payment due reminder
+  - `subscription.expired` - Max billing cycles reached
+
+- **New Reason Codes**:
+  - `SUBSCRIPTION_CANCELLED`
+  - `SUBSCRIPTION_PAST_DUE`
+  - `SUBSCRIPTION_PAUSED`
+  - `SUBSCRIPTION_EXPIRED`
+  - `SUBSCRIPTION_MAX_CYCLES_REACHED`
+
+### New Exports
+
+- `SubscriptionManager`, `createSubscriptionManager`
+- `calculateNextBillingDate()`, `isPaymentDue()`, `isInTrialPeriod()`, `isWithinGracePeriod()`, `getIntervalDisplayName()`
+- Types: `Subscription`, `SubscriptionConfig`, `SubscriptionInterval`, `SubscriptionStatus`, `CreateSubscriptionInput`
+- `WebhookSubscriptionData` type
+
+### Technical
+
+- New file: `lib/subscription.ts` - Subscription management
+- Updated `Storage` interface with subscription methods
+- Updated `MemoryStorage` with subscription storage
+- 402 response now includes subscription info for subscription links
+- Automatic periodic check for due subscriptions (every 60 seconds)
+
 ## [1.2.0] - 2024-11-30
 
 ### Added

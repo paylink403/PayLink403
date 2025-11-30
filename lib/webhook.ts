@@ -1,5 +1,5 @@
 import { createHmac } from 'crypto';
-import type { PayLink, Payment } from './types.js';
+import type { PayLink, Payment, Subscription } from './types.js';
 
 /**
  * Webhook configuration
@@ -29,7 +29,16 @@ export type WebhookEvent =
   | 'payment.underpaid'
   | 'link.created'
   | 'link.disabled'
-  | 'link.expired';
+  | 'link.expired'
+  | 'subscription.created'
+  | 'subscription.renewed'
+  | 'subscription.cancelled'
+  | 'subscription.paused'
+  | 'subscription.resumed'
+  | 'subscription.past_due'
+  | 'subscription.expired'
+  | 'subscription.trial_ending'
+  | 'subscription.payment_due';
 
 /**
  * Webhook payload base
@@ -42,7 +51,7 @@ export interface WebhookPayload {
   /** Unique event ID */
   eventId: string;
   /** Event data */
-  data: WebhookPaymentData | WebhookLinkData;
+  data: WebhookPaymentData | WebhookLinkData | WebhookSubscriptionData;
 }
 
 /**
@@ -96,6 +105,41 @@ export interface WebhookLinkData {
 }
 
 /**
+ * Subscription event data
+ */
+export interface WebhookSubscriptionData {
+  type: 'subscription';
+  subscription: {
+    id: string;
+    payLinkId: string;
+    subscriberAddress: string;
+    status: string;
+    currentPeriodStart: string;
+    currentPeriodEnd: string;
+    nextPaymentDue: string;
+    cycleCount: number;
+    createdAt: string;
+    cancelledAt?: string;
+    pausedAt?: string;
+    trialEndsAt?: string;
+  };
+  payLink: {
+    id: string;
+    targetUrl: string;
+    price: {
+      amount: string;
+      tokenSymbol: string;
+      chainId: number;
+    };
+    recipientAddress: string;
+    subscription?: {
+      interval: string;
+      intervalCount?: number;
+    };
+  };
+}
+
+/**
  * Webhook delivery result
  */
 export interface WebhookResult {
@@ -129,6 +173,15 @@ export class WebhookManager {
         'payment.underpaid',
         'link.created',
         'link.disabled',
+        'subscription.created',
+        'subscription.renewed',
+        'subscription.cancelled',
+        'subscription.paused',
+        'subscription.resumed',
+        'subscription.past_due',
+        'subscription.expired',
+        'subscription.trial_ending',
+        'subscription.payment_due',
       ],
       timeout: config.timeout ?? 10000,
       retries: config.retries ?? 3,
@@ -211,6 +264,54 @@ export class WebhookManager {
           description: payLink.description,
           maxUses: payLink.maxUses,
           expiresAt: payLink.expiresAt?.toISOString(),
+        },
+      },
+    };
+
+    return this.send(payload);
+  }
+
+  /**
+   * Send subscription event
+   */
+  async sendSubscriptionEvent(
+    event: WebhookEvent,
+    subscription: Subscription,
+    payLink: PayLink
+  ): Promise<WebhookResult | null> {
+    if (!this.isEventEnabled(event)) {
+      return null;
+    }
+
+    const payload: WebhookPayload = {
+      event,
+      timestamp: new Date().toISOString(),
+      eventId: this.generateEventId(),
+      data: {
+        type: 'subscription',
+        subscription: {
+          id: subscription.id,
+          payLinkId: subscription.payLinkId,
+          subscriberAddress: subscription.subscriberAddress,
+          status: subscription.status,
+          currentPeriodStart: subscription.currentPeriodStart.toISOString(),
+          currentPeriodEnd: subscription.currentPeriodEnd.toISOString(),
+          nextPaymentDue: subscription.nextPaymentDue.toISOString(),
+          cycleCount: subscription.cycleCount,
+          createdAt: subscription.createdAt.toISOString(),
+          cancelledAt: subscription.cancelledAt?.toISOString(),
+          pausedAt: subscription.pausedAt?.toISOString(),
+          trialEndsAt: subscription.trialEndsAt?.toISOString(),
+        },
+        payLink: {
+          id: payLink.id,
+          targetUrl: payLink.targetUrl,
+          price: payLink.price,
+          recipientAddress: payLink.recipientAddress,
+          subscription: payLink.subscription ? {
+            interval: payLink.subscription.interval,
+            intervalCount: payLink.subscription.intervalCount,
+          } : undefined,
         },
       },
     };

@@ -73,4 +73,9 @@ export const REASON_MESSAGES: Record<string, string> = {
   PAYMENT_CHAIN_NOT_SUPPORTED: 'This blockchain is not supported.',
   ACCESS_DENIED: 'Access denied.',
   INTERNAL_ERROR: 'An internal error occurred.',
+  SUBSCRIPTION_CANCELLED: 'This subscription has been cancelled.',
+  SUBSCRIPTION_PAST_DUE: 'Subscription payment is past due.',
+  SUBSCRIPTION_PAUSED: 'This subscription is paused.',
+  SUBSCRIPTION_EXPIRED: 'This subscription has expired.',
+  SUBSCRIPTION_MAX_CYCLES_REACHED: 'Subscription has reached maximum billing cycles.',
 };

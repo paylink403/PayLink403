@@ -1,4 +1,4 @@
-import type { Storage, PayLink, Payment } from './types.js';
+import type { Storage, PayLink, Payment, Subscription } from './types.js';
 
 /**
  * In-memory storage implementation
@@ -9,6 +9,9 @@ export class MemoryStorage implements Storage {
   private payments = new Map<string, Payment>();
   private paymentsByTx = new Map<string, Payment>();
   private paymentsByLink = new Map<string, Payment[]>();
+  private subscriptions = new Map<string, Subscription>();
+  private subscriptionsByAddress = new Map<string, Subscription>();
+  private subscriptionsByLink = new Map<string, Subscription[]>();
 
   async getPayLink(id: string): Promise<PayLink | null> {
     return this.links.get(id) ?? null;
@@ -55,11 +58,82 @@ export class MemoryStorage implements Storage {
     return Array.from(this.payments.values());
   }
 
+  // Subscription methods
+
+  async saveSubscription(subscription: Subscription): Promise<void> {
+    this.subscriptions.set(subscription.id, { ...subscription });
+    
+    // Index by address
+    const addressKey = `${subscription.payLinkId}:${subscription.subscriberAddress}`;
+    this.subscriptionsByAddress.set(addressKey, subscription);
+    
+    // Index by link
+    const linkSubs = this.subscriptionsByLink.get(subscription.payLinkId) ?? [];
+    linkSubs.push(subscription);
+    this.subscriptionsByLink.set(subscription.payLinkId, linkSubs);
+  }
+
+  async getSubscription(id: string): Promise<Subscription | null> {
+    return this.subscriptions.get(id) ?? null;
+  }
+
+  async updateSubscription(subscription: Subscription): Promise<void> {
+    if (!this.subscriptions.has(subscription.id)) {
+      throw new Error(`Subscription ${subscription.id} not found`);
+    }
+    
+    const updated = { ...subscription, updatedAt: new Date() };
+    this.subscriptions.set(subscription.id, updated);
+    
+    // Update address index
+    const addressKey = `${subscription.payLinkId}:${subscription.subscriberAddress}`;
+    this.subscriptionsByAddress.set(addressKey, updated);
+    
+    // Update link index
+    const linkSubs = this.subscriptionsByLink.get(subscription.payLinkId) ?? [];
+    const idx = linkSubs.findIndex(s => s.id === subscription.id);
+    if (idx !== -1) {
+      linkSubs[idx] = updated;
+    }
+  }
+
+  async getSubscriptionByAddress(
+    payLinkId: string,
+    subscriberAddress: string
+  ): Promise<Subscription | null> {
+    const addressKey = `${payLinkId}:${subscriberAddress}`;
+    return this.subscriptionsByAddress.get(addressKey) ?? null;
+  }
+
+  async getSubscriptionsByPayLink(payLinkId: string): Promise<Subscription[]> {
+    return this.subscriptionsByLink.get(payLinkId) ?? [];
+  }
+
+  async getSubscriptionsDue(beforeDate: Date): Promise<Subscription[]> {
+    const result: Subscription[] = [];
+    for (const sub of this.subscriptions.values()) {
+      if (
+        sub.status === 'active' &&
+        sub.nextPaymentDue <= beforeDate
+      ) {
+        result.push(sub);
+      }
+    }
+    return result;
+  }
+
+  async getAllSubscriptions(): Promise<Subscription[]> {
+    return Array.from(this.subscriptions.values());
+  }
+
   /** Clear all data */
   clear(): void {
     this.links.clear();
     this.payments.clear();
     this.paymentsByTx.clear();
     this.paymentsByLink.clear();
+    this.subscriptions.clear();
+    this.subscriptionsByAddress.clear();
+    this.subscriptionsByLink.clear();
   }
 }

@@ -17,6 +17,12 @@ export type {
   Protocol403Response,
   PaymentCheckResult,
   WebhookConfigType,
+  // Subscription types
+  Subscription,
+  SubscriptionConfig,
+  SubscriptionInterval,
+  SubscriptionStatus,
+  CreateSubscriptionInput,
 } from './types.js';
 
 export { ReasonCode, SOLANA_CHAIN_IDS } from './types.js';
@@ -53,7 +59,19 @@ export type {
   WebhookResult,
   WebhookPaymentData,
   WebhookLinkData,
+  WebhookSubscriptionData,
 } from './webhook.js';
+
+// Subscriptions
+export {
+  SubscriptionManager,
+  createSubscriptionManager,
+  calculateNextBillingDate,
+  isPaymentDue,
+  isInTrialPeriod,
+  isWithinGracePeriod,
+  getIntervalDisplayName,
+} from './subscription.js';
 
 // PAYLINK Token
 export {

@@ -10,6 +10,8 @@ import type {
   Protocol403Response,
   Storage,
   ChainConfig,
+  Subscription,
+  CreateSubscriptionInput,
 } from './types.js';
 import { ReasonCode, SOLANA_CHAIN_IDS } from './types.js';
 import { MemoryStorage } from './storage.js';
@@ -26,6 +28,12 @@ import {
   isLimitReached,
   REASON_MESSAGES,
 } from './utils.js';
+import {
+  SubscriptionManager,
+  isPaymentDue,
+  isInTrialPeriod,
+  getIntervalDisplayName,
+} from './subscription.js';
 
 type Verifier = ChainVerifier | MockVerifier | SolanaVerifier | MockSolanaVerifier;
 
@@ -43,6 +51,8 @@ export class PaylinkServer {
   private storage: Storage;
   private verifiers: Map<number, Verifier>;
   private webhookManager?: WebhookManager;
+  private subscriptionManager: SubscriptionManager;
+  private subscriptionCheckInterval?: NodeJS.Timeout;
 
   constructor(config: PaylinkConfig) {
     // Default config
@@ -61,6 +71,7 @@ export class PaylinkServer {
 
     this.storage = new MemoryStorage();
     this.verifiers = new Map();
+    this.subscriptionManager = new SubscriptionManager(this.storage);
 
     // Initialize webhook manager
     if (config.webhook?.url) {
@@ -125,16 +136,27 @@ export class PaylinkServer {
    */
   setStorage(storage: Storage): void {
     this.storage = storage;
+    this.subscriptionManager = new SubscriptionManager(storage);
+  }
+
+  /**
+   * Get subscription manager
+   */
+  getSubscriptionManager(): SubscriptionManager {
+    return this.subscriptionManager;
   }
 
   /**
    * Start server
    */
   start(): void {
+    // Start subscription payment check
+    this.startSubscriptionCheck();
+
     this.app.listen(this.config.port, () => {
       console.log('');
       console.log('╔══════════════════════════════════════════════════════════╗');
-      console.log('║              Paylink Protocol Server v1.1.0              ║');
+      console.log('║              Paylink Protocol Server v1.3.0              ║');
       console.log('╠══════════════════════════════════════════════════════════╣');
       console.log(`║  Port:     ${String(this.config.port).padEnd(44)}║`);
       console.log(`║  Base URL: ${(this.config.baseUrl || 'http://localhost:' + this.config.port).padEnd(44)}║`);
@@ -225,6 +247,149 @@ export class PaylinkServer {
   }
 
   // ========================================
+  // SUBSCRIPTION METHODS
+  // ========================================
+
+  /**
+   * Create a subscription for a subscriber
+   */
+  async createSubscription(
+    payLinkId: string,
+    subscriberAddress: string,
+    metadata?: Record<string, unknown>
+  ): Promise<Subscription> {
+    const link = await this.storage.getPayLink(payLinkId);
+    if (!link) throw new Error('PayLink not found');
+    if (!link.subscription) throw new Error('PayLink is not a subscription link');
+
+    const subscription = await this.subscriptionManager.createSubscription(link, {
+      payLinkId,
+      subscriberAddress,
+      metadata,
+    });
+
+    // Send webhook
+    if (this.webhookManager) {
+      this.webhookManager.sendSubscriptionEvent('subscription.created', subscription, link).catch(err => {
+        console.error('Webhook error:', err);
+      });
+    }
+
+    return subscription;
+  }
+
+  /**
+   * Cancel a subscription
+   */
+  async cancelSubscription(subscriptionId: string): Promise<Subscription> {
+    const subscription = await this.subscriptionManager.cancelSubscription(subscriptionId);
+    const link = await this.storage.getPayLink(subscription.payLinkId);
+
+    if (this.webhookManager && link) {
+      this.webhookManager.sendSubscriptionEvent('subscription.cancelled', subscription, link).catch(err => {
+        console.error('Webhook error:', err);
+      });
+    }
+
+    return subscription;
+  }
+
+  /**
+   * Pause a subscription
+   */
+  async pauseSubscription(subscriptionId: string): Promise<Subscription> {
+    const subscription = await this.subscriptionManager.pauseSubscription(subscriptionId);
+    const link = await this.storage.getPayLink(subscription.payLinkId);
+
+    if (this.webhookManager && link) {
+      this.webhookManager.sendSubscriptionEvent('subscription.paused', subscription, link).catch(err => {
+        console.error('Webhook error:', err);
+      });
+    }
+
+    return subscription;
+  }
+
+  /**
+   * Resume a subscription
+   */
+  async resumeSubscription(subscriptionId: string): Promise<Subscription> {
+    const subscription = await this.subscriptionManager.resumeSubscription(subscriptionId);
+    const link = await this.storage.getPayLink(subscription.payLinkId);
+
+    if (this.webhookManager && link) {
+      this.webhookManager.sendSubscriptionEvent('subscription.resumed', subscription, link).catch(err => {
+        console.error('Webhook error:', err);
+      });
+    }
+
+    return subscription;
+  }
+
+  /**
+   * Get subscription by ID
+   */
+  async getSubscription(id: string): Promise<Subscription | null> {
+    return this.subscriptionManager.getSubscription(id);
+  }
+
+  /**
+   * Start periodic subscription check
+   */
+  private startSubscriptionCheck(): void {
+    // Check every minute
+    this.subscriptionCheckInterval = setInterval(async () => {
+      try {
+        const dueSubscriptions = await this.subscriptionManager.getDueSubscriptions();
+        
+        for (const sub of dueSubscriptions) {
+          const link = await this.storage.getPayLink(sub.payLinkId);
+          if (!link) continue;
+
+          const gracePeriodHours = link.subscription?.gracePeriodHours ?? 24;
+          const graceEnd = new Date(sub.nextPaymentDue);
+          graceEnd.setHours(graceEnd.getHours() + gracePeriodHours);
+
+          const now = new Date();
+
+          // Check if past grace period
+          if (now > graceEnd && sub.status === 'active') {
+            await this.subscriptionManager.markPastDue(sub.id);
+            
+            if (this.webhookManager) {
+              const updated = await this.subscriptionManager.getSubscription(sub.id);
+              if (updated) {
+                this.webhookManager.sendSubscriptionEvent('subscription.past_due', updated, link).catch(err => {
+                  console.error('Webhook error:', err);
+                });
+              }
+            }
+          } else if (sub.status === 'active') {
+            // Send payment due webhook
+            if (this.webhookManager) {
+              this.webhookManager.sendSubscriptionEvent('subscription.payment_due', sub, link).catch(err => {
+                console.error('Webhook error:', err);
+              });
+            }
+          }
+        }
+      } catch (error) {
+        console.error('Subscription check error:', error);
+      }
+    }, 60000);
+  }
+
+  /**
+   * Stop subscription check
+   */
+  stopSubscriptionCheck(): void {
+    if (this.subscriptionCheckInterval) {
+      clearInterval(this.subscriptionCheckInterval);
+      this.subscriptionCheckInterval = undefined;
+    }
+  }
+
+  // ========================================
   // PRIVATE METHODS
   // ========================================
 
@@ -259,12 +424,13 @@ export class PaylinkServer {
       const base = this.config.baseUrl || `http://localhost:${this.config.port}`;
       res.json({
         name: 'Paylink Protocol',
-        version: '1.0.0',
+        version: '1.3.0',
         chains: this.config.chains.map(c => ({ id: c.chainId, name: c.name, symbol: c.symbol })),
         endpoints: {
           paylink: `${base}${this.config.basePath}/:id`,
           status: `${base}${this.config.basePath}/:id/status`,
           confirm: `${base}${this.config.basePath}/:id/confirm`,
+          subscribe: `${base}${this.config.basePath}/:id/subscribe`,
         },
       });
     });
@@ -274,6 +440,10 @@ export class PaylinkServer {
     this.app.get(`${this.config.basePath}/:id/status`, this.handleStatus.bind(this));
     this.app.post(`${this.config.basePath}/:id/confirm`, this.handleConfirm.bind(this));
     this.app.get(`${this.config.basePath}/:id/qr`, this.handleQRCode.bind(this));
+    
+    // Subscription routes
+    this.app.post(`${this.config.basePath}/:id/subscribe`, this.handleSubscribe.bind(this));
+    this.app.get(`${this.config.basePath}/:id/subscription`, this.handleGetSubscription.bind(this));
 
     // Admin API
     if (this.config.apiKey) {
@@ -283,6 +453,13 @@ export class PaylinkServer {
       this.app.get('/api/links/:id', auth, this.apiGetLink.bind(this));
       this.app.delete('/api/links/:id', auth, this.apiDeleteLink.bind(this));
       this.app.get('/api/payments', auth, this.apiListPayments.bind(this));
+      
+      // Subscription admin routes
+      this.app.get('/api/subscriptions', auth, this.apiListSubscriptions.bind(this));
+      this.app.get('/api/subscriptions/:id', auth, this.apiGetSubscription.bind(this));
+      this.app.post('/api/subscriptions/:id/cancel', auth, this.apiCancelSubscription.bind(this));
+      this.app.post('/api/subscriptions/:id/pause', auth, this.apiPauseSubscription.bind(this));
+      this.app.post('/api/subscriptions/:id/resume', auth, this.apiResumeSubscription.bind(this));
     }
   }
 
@@ -322,8 +499,8 @@ export class PaylinkServer {
         return;
       }
 
-      // Check usage limit
-      if (isLimitReached(link.usedCount, link.maxUses)) {
+      // Check usage limit (for non-subscription links)
+      if (!link.subscription && isLimitReached(link.usedCount, link.maxUses)) {
         this.send403(res, ReasonCode.LINK_USAGE_LIMIT_REACHED, link.id, {
           maxUses: link.maxUses,
           usedCount: link.usedCount,
@@ -331,7 +508,60 @@ export class PaylinkServer {
         return;
       }
 
-      // Check for confirmed payment
+      // Handle subscription links
+      if (link.subscription) {
+        const subscriberAddress = req.query.subscriber as string;
+        
+        if (subscriberAddress) {
+          const subscription = await this.storage.getSubscriptionByAddress(link.id, subscriberAddress);
+          
+          if (subscription) {
+            const access = await this.subscriptionManager.checkAccess(subscription, link);
+            
+            if (access.hasAccess) {
+              // Grant access
+              res.redirect(302, link.targetUrl);
+              return;
+            }
+            
+            // Check subscription status and return appropriate error
+            if (subscription.status === 'cancelled') {
+              this.send403(res, ReasonCode.SUBSCRIPTION_CANCELLED, link.id, {
+                subscriptionId: subscription.id,
+                cancelledAt: subscription.cancelledAt?.toISOString(),
+              });
+              return;
+            }
+            
+            if (subscription.status === 'paused') {
+              this.send403(res, ReasonCode.SUBSCRIPTION_PAUSED, link.id, {
+                subscriptionId: subscription.id,
+                pausedAt: subscription.pausedAt?.toISOString(),
+              });
+              return;
+            }
+            
+            if (subscription.status === 'expired') {
+              this.send403(res, ReasonCode.SUBSCRIPTION_EXPIRED, link.id, {
+                subscriptionId: subscription.id,
+              });
+              return;
+            }
+            
+            if (subscription.status === 'past_due') {
+              // Return 402 with subscription info for renewal
+              this.send402(res, link, subscription);
+              return;
+            }
+          }
+        }
+        
+        // No subscription or subscriber address - return 402 for new subscription
+        this.send402(res, link);
+        return;
+      }
+
+      // Check for confirmed payment (one-time links)
       const payment = await this.storage.getConfirmedPayment(link.id);
 
       if (payment) {
@@ -549,6 +779,191 @@ export class PaylinkServer {
   }
 
   // ========================================
+  // SUBSCRIPTION HANDLERS
+  // ========================================
+
+  /**
+   * Handle subscription creation/renewal
+   */
+  private async handleSubscribe(req: Request, res: Response): Promise<void> {
+    try {
+      const { subscriberAddress, txHash } = req.body;
+
+      if (!subscriberAddress) {
+        res.status(400).json({ error: 'Missing subscriberAddress' });
+        return;
+      }
+
+      const link = await this.storage.getPayLink(req.params.id);
+
+      if (!link) {
+        res.status(404).json({ error: 'Payment link not found' });
+        return;
+      }
+
+      if (!link.subscription) {
+        res.status(400).json({ error: 'This link does not support subscriptions' });
+        return;
+      }
+
+      // Check for existing subscription
+      let subscription = await this.storage.getSubscriptionByAddress(link.id, subscriberAddress);
+
+      // If txHash provided, verify payment first
+      if (txHash) {
+        const verifier = this.verifiers.get(link.price.chainId);
+        if (!verifier) {
+          res.status(400).json({ error: 'Chain not supported' });
+          return;
+        }
+
+        const result = await verifier.verifyPayment({
+          txHash,
+          recipient: link.recipientAddress,
+          amount: link.price.amount,
+        });
+
+        if (result.status !== 'confirmed') {
+          res.status(400).json({
+            error: 'Payment not confirmed',
+            status: result.status,
+          });
+          return;
+        }
+
+        // Save payment
+        const payment: Payment = {
+          id: generateUUID(),
+          payLinkId: link.id,
+          chainId: link.price.chainId,
+          txHash,
+          fromAddress: result.fromAddress ?? subscriberAddress,
+          amount: result.actualAmount ?? link.price.amount,
+          confirmed: true,
+          createdAt: new Date(),
+          confirmedAt: new Date(),
+        };
+        await this.storage.savePayment(payment);
+
+        // Send payment webhook
+        if (this.webhookManager) {
+          this.webhookManager.sendPaymentEvent('payment.confirmed', payment, link).catch(err => {
+            console.error('Webhook error:', err);
+          });
+        }
+
+        if (subscription) {
+          // Renew existing subscription
+          subscription = await this.subscriptionManager.processPayment(subscription, payment, link);
+
+          if (this.webhookManager) {
+            this.webhookManager.sendSubscriptionEvent('subscription.renewed', subscription, link).catch(err => {
+              console.error('Webhook error:', err);
+            });
+          }
+
+          res.json({
+            success: true,
+            action: 'renewed',
+            subscription: this.formatSubscriptionResponse(subscription, link),
+          });
+          return;
+        }
+      }
+
+      // Create new subscription
+      if (!subscription) {
+        subscription = await this.createSubscription(link.id, subscriberAddress);
+
+        res.status(201).json({
+          success: true,
+          action: 'created',
+          subscription: this.formatSubscriptionResponse(subscription, link),
+        });
+        return;
+      }
+
+      // Return existing subscription info
+      res.json({
+        success: true,
+        action: 'existing',
+        subscription: this.formatSubscriptionResponse(subscription, link),
+      });
+    } catch (error) {
+      console.error('Subscribe error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+
+  /**
+   * Handle get subscription status
+   */
+  private async handleGetSubscription(req: Request, res: Response): Promise<void> {
+    try {
+      const subscriberAddress = req.query.subscriber as string;
+
+      if (!subscriberAddress) {
+        res.status(400).json({ error: 'Missing subscriber query parameter' });
+        return;
+      }
+
+      const link = await this.storage.getPayLink(req.params.id);
+
+      if (!link) {
+        res.status(404).json({ error: 'Payment link not found' });
+        return;
+      }
+
+      const subscription = await this.storage.getSubscriptionByAddress(link.id, subscriberAddress);
+
+      if (!subscription) {
+        res.status(404).json({ error: 'Subscription not found' });
+        return;
+      }
+
+      const access = await this.subscriptionManager.checkAccess(subscription, link);
+
+      res.json({
+        subscription: this.formatSubscriptionResponse(subscription, link),
+        access: {
+          hasAccess: access.hasAccess,
+          reason: access.reason,
+          requiresPayment: access.requiresPayment,
+        },
+      });
+    } catch (error) {
+      console.error('Get subscription error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+
+  /**
+   * Format subscription for response
+   */
+  private formatSubscriptionResponse(subscription: Subscription, link: PayLink) {
+    const base = this.config.baseUrl || `http://localhost:${this.config.port}`;
+    
+    return {
+      id: subscription.id,
+      payLinkId: subscription.payLinkId,
+      subscriberAddress: subscription.subscriberAddress,
+      status: subscription.status,
+      interval: link.subscription?.interval,
+      intervalCount: link.subscription?.intervalCount ?? 1,
+      currentPeriodStart: subscription.currentPeriodStart.toISOString(),
+      currentPeriodEnd: subscription.currentPeriodEnd.toISOString(),
+      nextPaymentDue: subscription.nextPaymentDue.toISOString(),
+      cycleCount: subscription.cycleCount,
+      trialEndsAt: subscription.trialEndsAt?.toISOString(),
+      cancelledAt: subscription.cancelledAt?.toISOString(),
+      pausedAt: subscription.pausedAt?.toISOString(),
+      createdAt: subscription.createdAt.toISOString(),
+      price: link.price,
+      renewUrl: `${base}${this.config.basePath}/${link.id}/subscribe`,
+    };
+  }
+
+  // ========================================
   // ADMIN API HANDLERS
   // ========================================
 
@@ -563,11 +978,29 @@ export class PaylinkServer {
         description,
         maxUses,
         expiresIn,
+        // Subscription fields
+        subscription,
       } = req.body;
 
       if (!targetUrl || !amount || !recipientAddress) {
         res.status(400).json({ error: 'Missing: targetUrl, amount, or recipientAddress' });
         return;
+      }
+
+      // Parse subscription config if provided
+      let subscriptionConfig;
+      if (subscription) {
+        if (!subscription.interval || !['daily', 'weekly', 'monthly', 'yearly'].includes(subscription.interval)) {
+          res.status(400).json({ error: 'Invalid subscription interval. Must be: daily, weekly, monthly, or yearly' });
+          return;
+        }
+        subscriptionConfig = {
+          interval: subscription.interval,
+          intervalCount: subscription.intervalCount ? Number(subscription.intervalCount) : 1,
+          gracePeriodHours: subscription.gracePeriodHours ? Number(subscription.gracePeriodHours) : 24,
+          maxCycles: subscription.maxCycles ? Number(subscription.maxCycles) : undefined,
+          trialDays: subscription.trialDays ? Number(subscription.trialDays) : 0,
+        };
       }
 
       const link = await this.createPayLink({
@@ -577,6 +1010,7 @@ export class PaylinkServer {
         description,
         maxUses: maxUses ? Number(maxUses) : undefined,
         expiresAt: expiresIn ? new Date(Date.now() + Number(expiresIn) * 1000) : undefined,
+        subscription: subscriptionConfig,
       });
 
       const base = this.config.baseUrl || `http://localhost:${this.config.port}`;
@@ -592,6 +1026,14 @@ export class PaylinkServer {
           description: link.description,
           maxUses: link.maxUses,
           expiresAt: link.expiresAt?.toISOString(),
+          subscription: link.subscription ? {
+            interval: link.subscription.interval,
+            intervalCount: link.subscription.intervalCount,
+            gracePeriodHours: link.subscription.gracePeriodHours,
+            maxCycles: link.subscription.maxCycles,
+            trialDays: link.subscription.trialDays,
+            subscribeUrl: `${base}${this.config.basePath}/${link.id}/subscribe`,
+          } : undefined,
         },
       });
     } catch (error) {
@@ -612,6 +1054,8 @@ export class PaylinkServer {
         status: l.status,
         price: l.price,
         usedCount: l.usedCount,
+        isSubscription: !!l.subscription,
+        subscription: l.subscription,
       })),
     });
   }
@@ -666,10 +1110,92 @@ export class PaylinkServer {
   }
 
   // ========================================
+  // SUBSCRIPTION ADMIN ENDPOINTS
+  // ========================================
+
+  private async apiListSubscriptions(req: Request, res: Response): Promise<void> {
+    const subscriptions = await this.storage.getAllSubscriptions();
+    
+    res.json({
+      count: subscriptions.length,
+      subscriptions: subscriptions.map(s => ({
+        id: s.id,
+        payLinkId: s.payLinkId,
+        subscriberAddress: s.subscriberAddress,
+        status: s.status,
+        cycleCount: s.cycleCount,
+        nextPaymentDue: s.nextPaymentDue.toISOString(),
+        createdAt: s.createdAt.toISOString(),
+      })),
+    });
+  }
+
+  private async apiGetSubscription(req: Request, res: Response): Promise<void> {
+    const subscription = await this.storage.getSubscription(req.params.id);
+    
+    if (!subscription) {
+      res.status(404).json({ error: 'Subscription not found' });
+      return;
+    }
+
+    const link = await this.storage.getPayLink(subscription.payLinkId);
+
+    res.json({
+      id: subscription.id,
+      payLinkId: subscription.payLinkId,
+      subscriberAddress: subscription.subscriberAddress,
+      status: subscription.status,
+      currentPeriodStart: subscription.currentPeriodStart.toISOString(),
+      currentPeriodEnd: subscription.currentPeriodEnd.toISOString(),
+      nextPaymentDue: subscription.nextPaymentDue.toISOString(),
+      cycleCount: subscription.cycleCount,
+      lastPaymentId: subscription.lastPaymentId,
+      trialEndsAt: subscription.trialEndsAt?.toISOString(),
+      cancelledAt: subscription.cancelledAt?.toISOString(),
+      pausedAt: subscription.pausedAt?.toISOString(),
+      createdAt: subscription.createdAt.toISOString(),
+      updatedAt: subscription.updatedAt.toISOString(),
+      payLink: link ? {
+        id: link.id,
+        targetUrl: link.targetUrl,
+        price: link.price,
+        subscription: link.subscription,
+      } : undefined,
+    });
+  }
+
+  private async apiCancelSubscription(req: Request, res: Response): Promise<void> {
+    try {
+      const subscription = await this.cancelSubscription(req.params.id);
+      res.json({ success: true, subscription: { id: subscription.id, status: subscription.status } });
+    } catch (error) {
+      res.status(404).json({ error: (error as Error).message });
+    }
+  }
+
+  private async apiPauseSubscription(req: Request, res: Response): Promise<void> {
+    try {
+      const subscription = await this.pauseSubscription(req.params.id);
+      res.json({ success: true, subscription: { id: subscription.id, status: subscription.status } });
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+    }
+  }
+
+  private async apiResumeSubscription(req: Request, res: Response): Promise<void> {
+    try {
+      const subscription = await this.resumeSubscription(req.params.id);
+      res.json({ success: true, subscription: { id: subscription.id, status: subscription.status } });
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+    }
+  }
+
+  // ========================================
   // RESPONSE HELPERS
   // ========================================
 
-  private send402(res: Response, link: PayLink): void {
+  private send402(res: Response, link: PayLink, subscription?: Subscription): void {
     const base = this.config.baseUrl || `http://localhost:${this.config.port}`;
     const nonce = generateNonce();
 
@@ -693,6 +1219,18 @@ export class PaylinkServer {
       },
       nonce,
     };
+
+    // Add subscription info if this is a subscription link
+    if (link.subscription) {
+      body.subscription = {
+        interval: link.subscription.interval,
+        intervalCount: link.subscription.intervalCount ?? 1,
+        trialDays: link.subscription.trialDays,
+        existingSubscriptionId: subscription?.id,
+        subscriptionStatus: subscription?.status,
+        nextPaymentDue: subscription?.nextPaymentDue.toISOString(),
+      };
+    }
 
     if (this.config.signatureSecret) {
       const data = JSON.stringify({ payLinkId: body.payLinkId, payment: body.payment, nonce });

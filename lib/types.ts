@@ -9,6 +9,16 @@ export type PayLinkStatus = 'active' | 'disabled' | 'expired';
 export type PaymentStatus = 'not_found' | 'pending' | 'confirmed' | 'failed' | 'underpaid';
 
 /**
+ * Subscription interval
+ */
+export type SubscriptionInterval = 'daily' | 'weekly' | 'monthly' | 'yearly';
+
+/**
+ * Subscription status
+ */
+export type SubscriptionStatus = 'active' | 'past_due' | 'cancelled' | 'paused' | 'expired';
+
+/**
  * Chain type
  */
 export type ChainType = 'evm' | 'solana';
@@ -61,6 +71,45 @@ export interface PayLink {
   usedCount?: number;
   expiresAt?: Date;
   metadata?: Record<string, unknown>;
+  /** Subscription configuration */
+  subscription?: SubscriptionConfig;
+}
+
+/**
+ * Subscription configuration for a payment link
+ */
+export interface SubscriptionConfig {
+  /** Billing interval */
+  interval: SubscriptionInterval;
+  /** Number of intervals between billings (default: 1) */
+  intervalCount?: number;
+  /** Grace period in hours after due date before marking as past_due (default: 24) */
+  gracePeriodHours?: number;
+  /** Maximum number of billing cycles (undefined = unlimited) */
+  maxCycles?: number;
+  /** Trial period in days (0 = no trial) */
+  trialDays?: number;
+}
+
+/**
+ * Subscription entity
+ */
+export interface Subscription {
+  id: string;
+  payLinkId: string;
+  subscriberAddress: string;
+  status: SubscriptionStatus;
+  currentPeriodStart: Date;
+  currentPeriodEnd: Date;
+  nextPaymentDue: Date;
+  cycleCount: number;
+  lastPaymentId?: string;
+  createdAt: Date;
+  updatedAt: Date;
+  cancelledAt?: Date;
+  pausedAt?: Date;
+  trialEndsAt?: Date;
+  metadata?: Record<string, unknown>;
 }
 
 /**
@@ -89,6 +138,17 @@ export interface CreatePayLinkInput {
   maxUses?: number;
   expiresAt?: Date;
   metadata?: Record<string, unknown>;
+  /** Subscription configuration (if set, creates a subscription link) */
+  subscription?: SubscriptionConfig;
+}
+
+/**
+ * Input for creating a subscription
+ */
+export interface CreateSubscriptionInput {
+  payLinkId: string;
+  subscriberAddress: string;
+  metadata?: Record<string, unknown>;
 }
 
 /**
@@ -114,6 +174,18 @@ export interface Protocol402Response {
   };
   nonce: string;
   signature?: string;
+  /** Subscription info (if this is a subscription link) */
+  subscription?: {
+    interval: SubscriptionInterval;
+    intervalCount: number;
+    trialDays?: number;
+    /** Existing subscription ID if subscriber already has one */
+    existingSubscriptionId?: string;
+    /** Current subscription status */
+    subscriptionStatus?: SubscriptionStatus;
+    /** Next payment due date */
+    nextPaymentDue?: string;
+  };
 }
 
 /**
@@ -128,6 +200,11 @@ export enum ReasonCode {
   PAYMENT_CHAIN_NOT_SUPPORTED = 'PAYMENT_CHAIN_NOT_SUPPORTED',
   ACCESS_DENIED = 'ACCESS_DENIED',
   INTERNAL_ERROR = 'INTERNAL_ERROR',
+  SUBSCRIPTION_CANCELLED = 'SUBSCRIPTION_CANCELLED',
+  SUBSCRIPTION_PAST_DUE = 'SUBSCRIPTION_PAST_DUE',
+  SUBSCRIPTION_PAUSED = 'SUBSCRIPTION_PAUSED',
+  SUBSCRIPTION_EXPIRED = 'SUBSCRIPTION_EXPIRED',
+  SUBSCRIPTION_MAX_CYCLES_REACHED = 'SUBSCRIPTION_MAX_CYCLES_REACHED',
 }
 
 /**
@@ -157,6 +234,15 @@ export interface WebhookConfigType {
     | 'payment.underpaid'
     | 'link.created'
     | 'link.disabled'
+    | 'subscription.created'
+    | 'subscription.renewed'
+    | 'subscription.cancelled'
+    | 'subscription.paused'
+    | 'subscription.resumed'
+    | 'subscription.past_due'
+    | 'subscription.expired'
+    | 'subscription.trial_ending'
+    | 'subscription.payment_due'
   >;
   /** Request timeout in ms */
   timeout?: number;
@@ -232,4 +318,13 @@ export interface Storage {
   getPaymentByTxHash(txHash: string): Promise<Payment | null>;
   getConfirmedPayment(payLinkId: string): Promise<Payment | null>;
   getAllPayments(): Promise<Payment[]>;
+
+  // Subscription methods
+  saveSubscription(subscription: Subscription): Promise<void>;
+  getSubscription(id: string): Promise<Subscription | null>;
+  updateSubscription(subscription: Subscription): Promise<void>;
+  getSubscriptionByAddress(payLinkId: string, subscriberAddress: string): Promise<Subscription | null>;
+  getSubscriptionsByPayLink(payLinkId: string): Promise<Subscription[]>;
+  getSubscriptionsDue(beforeDate: Date): Promise<Subscription[]>;
+  getAllSubscriptions(): Promise<Subscription[]>;
 }

@@ -4,18 +4,20 @@ Self-hosted paid links with 402/403 protocol and blockchain payment verification
 
 **Each user runs their own server with their own RPC nodes.**
 
-## What's New in v1.1.0
+## What's New in v1.3.0
 
-- 🌐 **Solana Support** - Native SOL payment verification
-- 📱 **QR Code Generation** - Wallet-compatible payment QR codes
-- 🔔 **Webhooks** - Real-time payment notifications with HMAC signatures
+- 🔄 **Subscriptions** - Recurring payments with flexible billing intervals
+- ⏰ **Grace Periods** - Configurable grace periods for past due payments
+- 🎁 **Trial Periods** - Free trial support for subscriptions
+- 🔔 **Subscription Webhooks** - Events for subscription lifecycle
 
 ## Features
 
 - 🔗 Create paid links with automatic payment verification
+- 🔄 **Subscription links** with recurring payments
 - ⛓️ Multi-chain support (EVM chains + Solana)
 - 📱 QR codes with wallet deep links (Solana Pay, EIP-681)
-- 🔔 Webhook notifications for payment events
+- 🔔 Webhook notifications for payment and subscription events
 - 🔒 Standard 402/403 payment protocol
 - 🚀 Simple API, easy to integrate
 - 💻 Self-hosted - you control everything
@@ -113,6 +115,8 @@ server.start();
 | GET | `/pay/:id/status` | Check payment status |
 | POST | `/pay/:id/confirm` | Confirm payment with txHash |
 | GET | `/pay/:id/qr` | Get QR code for payment |
+| POST | `/pay/:id/subscribe` | Create or renew subscription |
+| GET | `/pay/:id/subscription?subscriber=ADDRESS` | Get subscription status |
 
 ### Admin Endpoints (require X-API-Key header)
 
@@ -123,6 +127,11 @@ server.start();
 | GET | `/api/links/:id` | Get link details |
 | DELETE | `/api/links/:id` | Disable link |
 | GET | `/api/payments` | List all payments |
+| GET | `/api/subscriptions` | List all subscriptions |
+| GET | `/api/subscriptions/:id` | Get subscription details |
+| POST | `/api/subscriptions/:id/cancel` | Cancel subscription |
+| POST | `/api/subscriptions/:id/pause` | Pause subscription |
+| POST | `/api/subscriptions/:id/resume` | Resume subscription |
 
 ## Usage Examples
 
@@ -254,6 +263,161 @@ QR JSON Response:
 - `LINK_USAGE_LIMIT_REACHED` - Max uses reached
 - `PAYMENT_UNDERPAID` - Amount too low
 - `PAYMENT_CHAIN_NOT_SUPPORTED` - Chain not configured
+- `SUBSCRIPTION_CANCELLED` - Subscription was cancelled
+- `SUBSCRIPTION_PAST_DUE` - Payment is past due
+- `SUBSCRIPTION_PAUSED` - Subscription is paused
+- `SUBSCRIPTION_EXPIRED` - Subscription has expired
+
+## Subscriptions
+
+Create subscription links for recurring payments.
+
+### Create a Subscription Link
+
+```bash
+curl -X POST http://localhost:3000/api/links \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-secret-key" \
+  -d '{
+    "targetUrl": "https://example.com/premium-content",
+    "amount": "0.1",
+    "tokenSymbol": "SOL",
+    "chainId": 101,
+    "recipientAddress": "YourSolanaWalletAddress",
+    "description": "Monthly premium subscription",
+    "subscription": {
+      "interval": "monthly",
+      "intervalCount": 1,
+      "gracePeriodHours": 48,
+      "trialDays": 7
+    }
+  }'
+```
+
+Response:
+```json
+{
+  "success": true,
+  "link": {
+    "id": "abc123",
+    "url": "http://localhost:3000/pay/abc123",
+    "subscription": {
+      "interval": "monthly",
+      "intervalCount": 1,
+      "gracePeriodHours": 48,
+      "trialDays": 7,
+      "subscribeUrl": "http://localhost:3000/pay/abc123/subscribe"
+    }
+  }
+}
+```
+
+### Subscribe to a Link
+
+```bash
+# Create new subscription (with initial payment)
+curl -X POST http://localhost:3000/pay/abc123/subscribe \
+  -H "Content-Type: application/json" \
+  -d '{
+    "subscriberAddress": "SubscriberWalletAddress",
+    "txHash": "TransactionHash..."
+  }'
+```
+
+Response:
+```json
+{
+  "success": true,
+  "action": "created",
+  "subscription": {
+    "id": "sub_xyz789",
+    "status": "active",
+    "interval": "monthly",
+    "currentPeriodStart": "2024-01-15T00:00:00.000Z",
+    "currentPeriodEnd": "2024-02-15T00:00:00.000Z",
+    "nextPaymentDue": "2024-02-15T00:00:00.000Z",
+    "cycleCount": 1,
+    "renewUrl": "http://localhost:3000/pay/abc123/subscribe"
+  }
+}
+```
+
+### Check Subscription Status
+
+```bash
+curl "http://localhost:3000/pay/abc123/subscription?subscriber=SubscriberWalletAddress"
+```
+
+Response:
+```json
+{
+  "subscription": {
+    "id": "sub_xyz789",
+    "status": "active",
+    "nextPaymentDue": "2024-02-15T00:00:00.000Z",
+    "cycleCount": 1
+  },
+  "access": {
+    "hasAccess": true,
+    "requiresPayment": false
+  }
+}
+```
+
+### Subscription Flow
+
+1. Create a subscription link with `subscription` config
+2. User visits the link, gets 402 with subscription info
+3. User pays and calls `/subscribe` with `subscriberAddress` and `txHash`
+4. Server creates subscription, grants immediate access
+5. Before `nextPaymentDue`, webhook `subscription.payment_due` is sent
+6. User renews by calling `/subscribe` again with new `txHash`
+7. If payment is late, `subscription.past_due` webhook is sent
+8. After grace period, access is revoked until payment
+
+### Subscription Intervals
+
+| Interval | Description |
+|----------|-------------|
+| `daily` | Bill every N days |
+| `weekly` | Bill every N weeks |
+| `monthly` | Bill every N months |
+| `yearly` | Bill every N years |
+
+### Subscription Config Options
+
+```javascript
+{
+  // Required: billing interval
+  interval: 'monthly',
+  
+  // Number of intervals between billings (default: 1)
+  // e.g., intervalCount: 2 with interval: 'weekly' = every 2 weeks
+  intervalCount: 1,
+  
+  // Hours after due date before marking as past_due (default: 24)
+  gracePeriodHours: 48,
+  
+  // Maximum billing cycles (undefined = unlimited)
+  maxCycles: 12,
+  
+  // Free trial period in days (0 = no trial)
+  trialDays: 7,
+}
+```
+
+### Subscription Webhook Events
+
+| Event | Description |
+|-------|-------------|
+| `subscription.created` | New subscription created |
+| `subscription.renewed` | Subscription payment received |
+| `subscription.cancelled` | Subscription cancelled |
+| `subscription.paused` | Subscription paused |
+| `subscription.resumed` | Subscription resumed |
+| `subscription.past_due` | Payment is past grace period |
+| `subscription.payment_due` | Payment is due (reminder) |
+| `subscription.expired` | Subscription reached max cycles |
 
 ## Webhooks
 

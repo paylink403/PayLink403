@@ -12,6 +12,7 @@ import type {
   ChainConfig,
   Subscription,
   CreateSubscriptionInput,
+  PaymentOption,
 } from './types.js';
 import { ReasonCode, SOLANA_CHAIN_IDS } from './types.js';
 import { MemoryStorage } from './storage.js';
@@ -198,6 +199,7 @@ export class PaylinkServer {
       id: generateId(),
       targetUrl: input.targetUrl,
       price: input.price,
+      paymentOptions: input.paymentOptions,
       recipientAddress: input.recipientAddress,
       status: 'active',
       createdAt: now,
@@ -207,6 +209,7 @@ export class PaylinkServer {
       usedCount: 0,
       expiresAt: input.expiresAt,
       metadata: input.metadata,
+      subscription: input.subscription,
     };
 
     await this.storage.savePayLink(payLink);
@@ -609,7 +612,7 @@ export class PaylinkServer {
 
   private async handleConfirm(req: Request, res: Response): Promise<void> {
     try {
-      const { txHash } = req.body;
+      const { txHash, chainId: requestedChainId } = req.body;
 
       if (!txHash || typeof txHash !== 'string') {
         res.status(400).json({ status: 'failed', message: 'Missing txHash' });
@@ -630,18 +633,51 @@ export class PaylinkServer {
         return;
       }
 
+      // Determine which payment option to verify
+      let chainId = link.price.chainId;
+      let expectedAmount = link.price.amount;
+      let recipient = link.recipientAddress;
+      let tokenSymbol = link.price.tokenSymbol;
+
+      // If chainId provided in request, find matching payment option
+      if (requestedChainId !== undefined) {
+        const numChainId = Number(requestedChainId);
+        
+        if (numChainId === link.price.chainId) {
+          // Primary price matches
+          chainId = link.price.chainId;
+          expectedAmount = link.price.amount;
+          tokenSymbol = link.price.tokenSymbol;
+        } else if (link.paymentOptions) {
+          // Look for matching payment option
+          const option = link.paymentOptions.find(opt => opt.chainId === numChainId);
+          if (option) {
+            chainId = option.chainId;
+            expectedAmount = option.amount;
+            tokenSymbol = option.tokenSymbol;
+            recipient = option.recipientAddress || link.recipientAddress;
+          } else {
+            res.status(400).json({ status: 'failed', message: 'Chain not accepted for this payment link' });
+            return;
+          }
+        } else {
+          res.status(400).json({ status: 'failed', message: 'Chain not accepted for this payment link' });
+          return;
+        }
+      }
+
       // Get verifier for chain
-      const verifier = this.verifiers.get(link.price.chainId);
+      const verifier = this.verifiers.get(chainId);
       if (!verifier) {
-        res.status(400).json({ status: 'failed', message: 'Chain not supported' });
+        res.status(400).json({ status: 'failed', message: 'Chain not supported by server' });
         return;
       }
 
       // Verify payment
       const result = await verifier.verifyPayment({
         txHash,
-        recipient: link.recipientAddress,
-        amount: link.price.amount,
+        recipient,
+        amount: expectedAmount,
       });
 
       switch (result.status) {
@@ -649,10 +685,11 @@ export class PaylinkServer {
           const payment: Payment = {
             id: generateUUID(),
             payLinkId: link.id,
-            chainId: link.price.chainId,
+            chainId,
             txHash,
             fromAddress: result.fromAddress ?? '',
-            amount: result.actualAmount ?? link.price.amount,
+            amount: result.actualAmount ?? expectedAmount,
+            tokenSymbol,
             confirmed: true,
             createdAt: new Date(),
             confirmedAt: new Date(),
@@ -666,7 +703,7 @@ export class PaylinkServer {
             });
           }
           
-          res.json({ status: 'confirmed' });
+          res.json({ status: 'confirmed', chainId, tokenSymbol });
           break;
         }
         case 'pending':
@@ -675,10 +712,11 @@ export class PaylinkServer {
             const pendingPayment: Payment = {
               id: generateUUID(),
               payLinkId: link.id,
-              chainId: link.price.chainId,
+              chainId,
               txHash,
               fromAddress: result.fromAddress ?? '',
-              amount: result.actualAmount ?? link.price.amount,
+              amount: result.actualAmount ?? expectedAmount,
+              tokenSymbol,
               confirmed: false,
               createdAt: new Date(),
             };
@@ -694,7 +732,7 @@ export class PaylinkServer {
             const underpaidPayment: Payment = {
               id: generateUUID(),
               payLinkId: link.id,
-              chainId: link.price.chainId,
+              chainId,
               txHash,
               fromAddress: result.fromAddress ?? '',
               amount: result.actualAmount ?? '0',
@@ -978,6 +1016,8 @@ export class PaylinkServer {
         description,
         maxUses,
         expiresIn,
+        // Multi-currency payment options
+        paymentOptions,
         // Subscription fields
         subscription,
       } = req.body;
@@ -985,6 +1025,17 @@ export class PaylinkServer {
       if (!targetUrl || !amount || !recipientAddress) {
         res.status(400).json({ error: 'Missing: targetUrl, amount, or recipientAddress' });
         return;
+      }
+
+      // Parse payment options if provided
+      let parsedPaymentOptions: PaymentOption[] | undefined;
+      if (paymentOptions && Array.isArray(paymentOptions)) {
+        parsedPaymentOptions = paymentOptions.map((opt: any) => ({
+          tokenSymbol: opt.tokenSymbol,
+          chainId: Number(opt.chainId),
+          amount: String(opt.amount),
+          recipientAddress: opt.recipientAddress,
+        }));
       }
 
       // Parse subscription config if provided
@@ -1006,6 +1057,7 @@ export class PaylinkServer {
       const link = await this.createPayLink({
         targetUrl,
         price: { amount: String(amount), tokenSymbol, chainId: Number(chainId) },
+        paymentOptions: parsedPaymentOptions,
         recipientAddress,
         description,
         maxUses: maxUses ? Number(maxUses) : undefined,
@@ -1022,6 +1074,7 @@ export class PaylinkServer {
           url: `${base}${this.config.basePath}/${link.id}`,
           targetUrl: link.targetUrl,
           price: link.price,
+          paymentOptions: link.paymentOptions,
           recipientAddress: link.recipientAddress,
           description: link.description,
           maxUses: link.maxUses,
@@ -1219,6 +1272,16 @@ export class PaylinkServer {
       },
       nonce,
     };
+
+    // Add multi-currency payment options
+    if (link.paymentOptions && link.paymentOptions.length > 0) {
+      body.paymentOptions = link.paymentOptions.map(opt => ({
+        chainId: opt.chainId,
+        tokenSymbol: opt.tokenSymbol,
+        amount: opt.amount,
+        recipient: opt.recipientAddress || link.recipientAddress,
+      }));
+    }
 
     // Add subscription info if this is a subscription link
     if (link.subscription) {

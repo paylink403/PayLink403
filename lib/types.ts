@@ -47,7 +47,7 @@ export const SOLANA_CHAIN_IDS = {
 } as const;
 
 /**
- * Price configuration
+ * Price configuration (single currency - legacy)
  */
 export interface Price {
   amount: string;
@@ -56,12 +56,40 @@ export interface Price {
 }
 
 /**
+ * Payment option for multi-currency support
+ */
+export interface PaymentOption {
+  /** Token symbol (e.g., ETH, SOL, USDC) */
+  tokenSymbol: string;
+  /** Chain ID where payment is accepted */
+  chainId: number;
+  /** Amount in this token */
+  amount: string;
+  /** Recipient address for this payment option (optional, uses default if not set) */
+  recipientAddress?: string;
+}
+
+/**
+ * Multi-currency price configuration
+ */
+export interface MultiPrice {
+  /** Default/primary price (used for display) */
+  primary: Price;
+  /** Additional accepted payment options */
+  options: PaymentOption[];
+}
+
+/**
  * Payment link entity
  */
 export interface PayLink {
   id: string;
   targetUrl: string;
+  /** Primary price (for backward compatibility) */
   price: Price;
+  /** Additional payment options for multi-currency */
+  paymentOptions?: PaymentOption[];
+  /** Default recipient address */
   recipientAddress: string;
   status: PayLinkStatus;
   createdAt: Date;
@@ -121,7 +149,10 @@ export interface Payment {
   chainId: number;
   txHash: string;
   fromAddress: string;
+  /** Amount paid */
   amount: string;
+  /** Token symbol used for payment */
+  tokenSymbol?: string;
   confirmed: boolean;
   createdAt: Date;
   confirmedAt?: Date;
@@ -132,7 +163,11 @@ export interface Payment {
  */
 export interface CreatePayLinkInput {
   targetUrl: string;
+  /** Primary price */
   price: Price;
+  /** Additional payment options for multi-currency */
+  paymentOptions?: PaymentOption[];
+  /** Default recipient address */
   recipientAddress: string;
   description?: string;
   maxUses?: number;
@@ -161,6 +196,7 @@ export interface Protocol402Response {
     description?: string;
     preview?: string | null;
   };
+  /** Primary payment option */
   payment: {
     chainId: number;
     tokenSymbol: string;
@@ -168,6 +204,13 @@ export interface Protocol402Response {
     recipient: string;
     timeoutSeconds: number;
   };
+  /** Additional payment options (multi-currency) */
+  paymentOptions?: Array<{
+    chainId: number;
+    tokenSymbol: string;
+    amount: string;
+    recipient: string;
+  }>;
   callbacks: {
     status: string;
     confirm: string;

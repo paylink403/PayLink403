@@ -4,16 +4,16 @@ Self-hosted paid links with 402/403 protocol and blockchain payment verification
 
 **Each user runs their own server with their own RPC nodes.**
 
-## What's New in v1.3.0
+## What's New in v1.4.0
 
-- 🔄 **Subscriptions** - Recurring payments with flexible billing intervals
-- ⏰ **Grace Periods** - Configurable grace periods for past due payments
-- 🎁 **Trial Periods** - Free trial support for subscriptions
-- 🔔 **Subscription Webhooks** - Events for subscription lifecycle
+- 💱 **Multi-Currency** - Accept multiple tokens/chains per payment link
+- 🎯 **Flexible Pricing** - Set different prices for each accepted token
+- 🔄 **Per-Token Recipients** - Different recipient addresses per payment option
 
 ## Features
 
 - 🔗 Create paid links with automatic payment verification
+- 💱 **Multi-currency support** - Accept ETH, SOL, USDC, etc. on one link
 - 🔄 **Subscription links** with recurring payments
 - ⛓️ Multi-chain support (EVM chains + Solana)
 - 📱 QR codes with wallet deep links (Solana Pay, EIP-681)
@@ -182,6 +182,70 @@ Response:
 }
 ```
 
+### Create a Multi-Currency Payment Link
+
+Accept multiple tokens on different chains with custom amounts for each:
+
+```bash
+curl -X POST http://localhost:3000/api/links \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-secret-key" \
+  -d '{
+    "targetUrl": "https://example.com/premium-content",
+    "amount": "0.01",
+    "tokenSymbol": "ETH",
+    "chainId": 1,
+    "recipientAddress": "0xYourEthAddress",
+    "description": "Premium content - pay with ETH or SOL",
+    "paymentOptions": [
+      {
+        "tokenSymbol": "SOL",
+        "chainId": 101,
+        "amount": "0.5",
+        "recipientAddress": "YourSolanaAddress"
+      },
+      {
+        "tokenSymbol": "MATIC",
+        "chainId": 137,
+        "amount": "15"
+      }
+    ]
+  }'
+```
+
+Response:
+```json
+{
+  "success": true,
+  "link": {
+    "id": "abc123",
+    "url": "http://localhost:3000/pay/abc123",
+    "price": {
+      "amount": "0.01",
+      "tokenSymbol": "ETH",
+      "chainId": 1
+    },
+    "paymentOptions": [
+      { "tokenSymbol": "SOL", "chainId": 101, "amount": "0.5", "recipientAddress": "YourSolanaAddress" },
+      { "tokenSymbol": "MATIC", "chainId": 137, "amount": "15" }
+    ]
+  }
+}
+```
+
+### Confirm Multi-Currency Payment
+
+When confirming a payment, specify which chain was used:
+
+```bash
+curl -X POST http://localhost:3000/pay/abc123/confirm \
+  -H "Content-Type: application/json" \
+  -d '{
+    "txHash": "5xK8...",
+    "chainId": 101
+  }'
+```
+
 ### Get QR Code
 
 ```bash
@@ -236,6 +300,10 @@ QR JSON Response:
     "recipient": "0x...",
     "timeoutSeconds": 900
   },
+  "paymentOptions": [
+    { "chainId": 101, "tokenSymbol": "SOL", "amount": "0.5", "recipient": "Sol..." },
+    { "chainId": 137, "tokenSymbol": "MATIC", "amount": "15", "recipient": "0x..." }
+  ],
   "callbacks": {
     "status": "http://localhost:3000/pay/abc123/status",
     "confirm": "http://localhost:3000/pay/abc123/confirm"
@@ -243,6 +311,8 @@ QR JSON Response:
   "nonce": "random-string"
 }
 ```
+
+The `payment` field contains the primary/default payment option. The `paymentOptions` array contains additional accepted tokens (only present for multi-currency links).
 
 ## 403 Response Format
 

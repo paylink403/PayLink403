@@ -7,6 +7,8 @@ export type {
   PayLink,
   Payment,
   Price,
+  PaymentOption,
+  MultiPrice,
   ChainConfig,
   ChainType,
   CreatePayLinkInput,

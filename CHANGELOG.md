@@ -2,6 +2,44 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.0] - 2024-11-30
+
+### Added
+
+- **Multi-Currency Support**: Accept multiple tokens/chains per payment link
+  - Define different prices for each accepted token
+  - Set different recipient addresses per payment option
+  - Automatic verification based on chain ID in confirm request
+
+- **New Types**:
+  - `PaymentOption` - Configuration for each accepted token
+  - `MultiPrice` - Multi-currency price structure
+
+- **Updated 402 Response**:
+  - New `paymentOptions` array in 402 response
+  - Shows all accepted payment methods with amounts
+
+### API Changes
+
+- `POST /api/links` now accepts `paymentOptions` array:
+  ```json
+  {
+    "paymentOptions": [
+      { "tokenSymbol": "SOL", "chainId": 101, "amount": "0.5" },
+      { "tokenSymbol": "MATIC", "chainId": 137, "amount": "15" }
+    ]
+  }
+  ```
+
+- `POST /pay/:id/confirm` now accepts optional `chainId`:
+  ```json
+  { "txHash": "...", "chainId": 101 }
+  ```
+
+### New Exports
+
+- Types: `PaymentOption`, `MultiPrice`
+
 ## [1.3.0] - 2024-11-30
 
 ### Added

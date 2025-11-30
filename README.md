@@ -645,7 +645,6 @@ ethereum:<recipient>@<chainId>?value=<weiAmount>
     },
   ],
   
-  // Webhook configuration
   webhook: {
     url: 'https://your-server.com/webhook',
     secret: 'hmac-secret',

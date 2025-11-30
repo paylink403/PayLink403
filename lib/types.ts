@@ -95,12 +95,19 @@ export interface PayLink {
   createdAt: Date;
   updatedAt: Date;
   description?: string;
+  /** Maximum total uses (for single-use links) */
   maxUses?: number;
   usedCount?: number;
   expiresAt?: Date;
   metadata?: Record<string, unknown>;
   /** Subscription configuration */
   subscription?: SubscriptionConfig;
+  /** 
+   * Multi-use mode: allows multiple users to pay for access
+   * Each payer gets their own access after payment
+   * When true, link doesn't expire after first payment
+   */
+  multiUse?: boolean;
 }
 
 /**
@@ -170,11 +177,17 @@ export interface CreatePayLinkInput {
   /** Default recipient address */
   recipientAddress: string;
   description?: string;
+  /** Maximum total uses (optional limit even for multi-use links) */
   maxUses?: number;
   expiresAt?: Date;
   metadata?: Record<string, unknown>;
   /** Subscription configuration (if set, creates a subscription link) */
   subscription?: SubscriptionConfig;
+  /** 
+   * Multi-use mode: allows multiple users to pay for access
+   * Each payer gets their own access after payment
+   */
+  multiUse?: boolean;
 }
 
 /**
@@ -360,6 +373,10 @@ export interface Storage {
   savePayment(payment: Payment): Promise<void>;
   getPaymentByTxHash(txHash: string): Promise<Payment | null>;
   getConfirmedPayment(payLinkId: string): Promise<Payment | null>;
+  /** Get confirmed payment for a specific payer address on a link */
+  getConfirmedPaymentByAddress(payLinkId: string, fromAddress: string): Promise<Payment | null>;
+  /** Get all payments for a link */
+  getPaymentsByLink(payLinkId: string): Promise<Payment[]>;
   getAllPayments(): Promise<Payment[]>;
 
   // Subscription methods

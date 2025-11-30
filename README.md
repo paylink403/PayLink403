@@ -4,15 +4,16 @@ Self-hosted paid links with 402/403 protocol and blockchain payment verification
 
 **Each user runs their own server with their own RPC nodes.**
 
-## What's New in v1.4.0
+## What's New in v1.5.0
 
-- 💱 **Multi-Currency** - Accept multiple tokens/chains per payment link
-- 🎯 **Flexible Pricing** - Set different prices for each accepted token
-- 🔄 **Per-Token Recipients** - Different recipient addresses per payment option
+- 🔄 **Multi-Use Links** - One link, multiple payers - each pays once for access
+- 👥 **Per-Address Tracking** - Track who has paid, grant access individually
+- 📊 **Usage Stats** - See total payments on multi-use links
 
 ## Features
 
 - 🔗 Create paid links with automatic payment verification
+- 🔄 **Multi-use links** - Sell access to unlimited users with one link
 - 💱 **Multi-currency support** - Accept ETH, SOL, USDC, etc. on one link
 - 🔄 **Subscription links** with recurring payments
 - ⛓️ Multi-chain support (EVM chains + Solana)
@@ -245,6 +246,68 @@ curl -X POST http://localhost:3000/pay/abc123/confirm \
     "chainId": 101
   }'
 ```
+
+### Create a Multi-Use Payment Link
+
+Multi-use links allow multiple users to pay for access. Each payer's address is tracked individually:
+
+```bash
+curl -X POST http://localhost:3000/api/links \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-secret-key" \
+  -d '{
+    "targetUrl": "https://example.com/premium-content",
+    "amount": "0.01",
+    "tokenSymbol": "ETH",
+    "chainId": 1,
+    "recipientAddress": "0xYourWalletAddress",
+    "description": "Premium content - pay once, access forever",
+    "multiUse": true,
+    "maxUses": 1000
+  }'
+```
+
+Response:
+```json
+{
+  "success": true,
+  "link": {
+    "id": "abc123",
+    "url": "http://localhost:3000/pay/abc123",
+    "multiUse": true,
+    "maxUses": 1000
+  }
+}
+```
+
+### Access Multi-Use Link
+
+Users must provide their payer address to check access:
+
+```bash
+# Check access (redirect if paid, 402 if not)
+curl http://localhost:3000/pay/abc123?payer=0xUserAddress
+
+# Check payment status
+curl http://localhost:3000/pay/abc123/status?payer=0xUserAddress
+```
+
+Status Response:
+```json
+{
+  "status": "paid",
+  "payerAddress": "0xUserAddress"
+}
+```
+
+### Multi-Use vs Single-Use vs Subscription
+
+| Feature | Single-Use | Multi-Use | Subscription |
+|---------|------------|-----------|--------------|
+| Payers | 1 | Unlimited | Unlimited |
+| Access check | Any payment | By payer address | By subscriber address |
+| Recurring | No | No | Yes |
+| Use case | One-time purchase | Sell to many | Recurring access |
 
 ### Get QR Code
 
@@ -645,6 +708,7 @@ ethereum:<recipient>@<chainId>?value=<weiAmount>
     },
   ],
   
+  // Webhook configuration
   webhook: {
     url: 'https://your-server.com/webhook',
     secret: 'hmac-secret',

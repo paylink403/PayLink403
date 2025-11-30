@@ -157,7 +157,7 @@ export class PaylinkServer {
     this.app.listen(this.config.port, () => {
       console.log('');
       console.log('╔══════════════════════════════════════════════════════════╗');
-      console.log('║              Paylink Protocol Server v1.3.0              ║');
+      console.log('║              Paylink Protocol Server v1.5.0              ║');
       console.log('╠══════════════════════════════════════════════════════════╣');
       console.log(`║  Port:     ${String(this.config.port).padEnd(44)}║`);
       console.log(`║  Base URL: ${(this.config.baseUrl || 'http://localhost:' + this.config.port).padEnd(44)}║`);
@@ -210,6 +210,7 @@ export class PaylinkServer {
       expiresAt: input.expiresAt,
       metadata: input.metadata,
       subscription: input.subscription,
+      multiUse: input.multiUse,
     };
 
     await this.storage.savePayLink(payLink);
@@ -502,8 +503,8 @@ export class PaylinkServer {
         return;
       }
 
-      // Check usage limit (for non-subscription links)
-      if (!link.subscription && isLimitReached(link.usedCount, link.maxUses)) {
+      // Check usage limit (for non-subscription, non-multiUse links)
+      if (!link.subscription && !link.multiUse && isLimitReached(link.usedCount, link.maxUses)) {
         this.send403(res, ReasonCode.LINK_USAGE_LIMIT_REACHED, link.id, {
           maxUses: link.maxUses,
           usedCount: link.usedCount,
@@ -564,7 +565,42 @@ export class PaylinkServer {
         return;
       }
 
-      // Check for confirmed payment (one-time links)
+      // Handle multi-use links (requires payer address)
+      if (link.multiUse) {
+        const payerAddress = req.query.payer as string;
+        
+        if (!payerAddress) {
+          // No payer address provided - return 402 with info
+          this.send402(res, link);
+          return;
+        }
+        
+        // Check if this address has already paid
+        const payment = await this.storage.getConfirmedPaymentByAddress(link.id, payerAddress);
+        
+        if (payment) {
+          // Check maxUses limit if set
+          if (link.maxUses && (link.usedCount ?? 0) >= link.maxUses) {
+            this.send403(res, ReasonCode.LINK_USAGE_LIMIT_REACHED, link.id, {
+              maxUses: link.maxUses,
+              usedCount: link.usedCount,
+            });
+            return;
+          }
+          
+          // Increment usage and redirect
+          link.usedCount = (link.usedCount ?? 0) + 1;
+          await this.storage.updatePayLink(link);
+          res.redirect(302, link.targetUrl);
+          return;
+        }
+        
+        // No payment from this address - return 402
+        this.send402(res, link);
+        return;
+      }
+
+      // Standard single-use links: Check for any confirmed payment
       const payment = await this.storage.getConfirmedPayment(link.id);
 
       if (payment) {
@@ -597,7 +633,35 @@ export class PaylinkServer {
         return;
       }
 
-      if (isExpired(link.expiresAt) || isLimitReached(link.usedCount, link.maxUses)) {
+      if (isExpired(link.expiresAt)) {
+        res.json({ status: 'forbidden' });
+        return;
+      }
+
+      // For multi-use links, check by address
+      if (link.multiUse) {
+        const payerAddress = req.query.payer as string;
+        
+        if (!payerAddress) {
+          // Return link info without payment status
+          res.json({ 
+            status: 'multiUse',
+            message: 'Provide ?payer=ADDRESS to check payment status',
+            totalPayments: (await this.storage.getPaymentsByLink(link.id)).filter(p => p.confirmed).length,
+          });
+          return;
+        }
+        
+        const payment = await this.storage.getConfirmedPaymentByAddress(link.id, payerAddress);
+        res.json({ 
+          status: payment ? 'paid' : 'unpaid',
+          payerAddress,
+        });
+        return;
+      }
+
+      // For single-use links, check maxUses
+      if (isLimitReached(link.usedCount, link.maxUses)) {
         res.json({ status: 'forbidden' });
         return;
       }
@@ -1020,6 +1084,8 @@ export class PaylinkServer {
         paymentOptions,
         // Subscription fields
         subscription,
+        // Multi-use mode
+        multiUse,
       } = req.body;
 
       if (!targetUrl || !amount || !recipientAddress) {
@@ -1063,6 +1129,7 @@ export class PaylinkServer {
         maxUses: maxUses ? Number(maxUses) : undefined,
         expiresAt: expiresIn ? new Date(Date.now() + Number(expiresIn) * 1000) : undefined,
         subscription: subscriptionConfig,
+        multiUse: multiUse === true || multiUse === 'true',
       });
 
       const base = this.config.baseUrl || `http://localhost:${this.config.port}`;
@@ -1078,6 +1145,7 @@ export class PaylinkServer {
           recipientAddress: link.recipientAddress,
           description: link.description,
           maxUses: link.maxUses,
+          multiUse: link.multiUse,
           expiresAt: link.expiresAt?.toISOString(),
           subscription: link.subscription ? {
             interval: link.subscription.interval,

@@ -9,6 +9,7 @@ export class MemoryStorage implements Storage {
   private payments = new Map<string, Payment>();
   private paymentsByTx = new Map<string, Payment>();
   private paymentsByLink = new Map<string, Payment[]>();
+  private paymentsByAddress = new Map<string, Payment>();
   private subscriptions = new Map<string, Subscription>();
   private subscriptionsByAddress = new Map<string, Subscription>();
   private subscriptionsByLink = new Map<string, Subscription[]>();
@@ -40,9 +41,16 @@ export class MemoryStorage implements Storage {
     this.payments.set(payment.id, { ...payment });
     this.paymentsByTx.set(payment.txHash, payment);
     
+    // Index by link
     const list = this.paymentsByLink.get(payment.payLinkId) ?? [];
     list.push(payment);
     this.paymentsByLink.set(payment.payLinkId, list);
+    
+    // Index by address (for multi-use links)
+    if (payment.fromAddress) {
+      const addressKey = `${payment.payLinkId}:${payment.fromAddress.toLowerCase()}`;
+      this.paymentsByAddress.set(addressKey, payment);
+    }
   }
 
   async getPaymentByTxHash(txHash: string): Promise<Payment | null> {
@@ -52,6 +60,22 @@ export class MemoryStorage implements Storage {
   async getConfirmedPayment(payLinkId: string): Promise<Payment | null> {
     const list = this.paymentsByLink.get(payLinkId) ?? [];
     return list.find(p => p.confirmed) ?? null;
+  }
+
+  async getConfirmedPaymentByAddress(
+    payLinkId: string,
+    fromAddress: string
+  ): Promise<Payment | null> {
+    const addressKey = `${payLinkId}:${fromAddress.toLowerCase()}`;
+    const payment = this.paymentsByAddress.get(addressKey);
+    if (payment && payment.confirmed) {
+      return payment;
+    }
+    return null;
+  }
+
+  async getPaymentsByLink(payLinkId: string): Promise<Payment[]> {
+    return this.paymentsByLink.get(payLinkId) ?? [];
   }
 
   async getAllPayments(): Promise<Payment[]> {
@@ -132,6 +156,7 @@ export class MemoryStorage implements Storage {
     this.payments.clear();
     this.paymentsByTx.clear();
     this.paymentsByLink.clear();
+    this.paymentsByAddress.clear();
     this.subscriptions.clear();
     this.subscriptionsByAddress.clear();
     this.subscriptionsByLink.clear();

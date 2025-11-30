@@ -2,6 +2,43 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.0] - 2024-12-01
+
+### Added
+
+- **Multi-Use Links**: One link, multiple payers - each pays once for access
+  - Set `multiUse: true` when creating a link
+  - Each payer's address is tracked individually
+  - Access granted per-address after payment confirmation
+  - Optional `maxUses` limit even for multi-use links
+
+- **Per-Address Payment Tracking**:
+  - New storage method `getConfirmedPaymentByAddress()`
+  - New storage method `getPaymentsByLink()`
+  - Payments indexed by payer address for fast lookups
+
+- **Updated Status Endpoint**:
+  - Multi-use links return total payment count
+  - Use `?payer=ADDRESS` to check specific payer's status
+
+### API Changes
+
+- `POST /api/links` now accepts `multiUse` boolean:
+  ```json
+  {
+    "multiUse": true,
+    "maxUses": 1000
+  }
+  ```
+
+- `GET /pay/:id?payer=ADDRESS` - Access check for multi-use links
+- `GET /pay/:id/status?payer=ADDRESS` - Payment status for specific payer
+
+### Storage Interface Changes
+
+- Added `getConfirmedPaymentByAddress(payLinkId, fromAddress)` method
+- Added `getPaymentsByLink(payLinkId)` method
+
 ## [1.4.0] - 2024-11-30
 
 ### Added

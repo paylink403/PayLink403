@@ -521,7 +521,6 @@ Response:
 
 ```javascript
 {
-  // Required: billing interval
   interval: 'monthly',
   
   // Number of intervals between billings (default: 1)

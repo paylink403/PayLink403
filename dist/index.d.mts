@@ -9,6 +9,14 @@ type PayLinkStatus = 'active' | 'disabled' | 'expired';
  */
 type ReferralStatus = 'pending' | 'confirmed' | 'paid' | 'expired';
 /**
+ * Installment plan status
+ */
+type InstallmentStatus = 'pending' | 'active' | 'suspended' | 'completed' | 'cancelled';
+/**
+ * Installment payment status
+ */
+type InstallmentPaymentStatus = 'pending' | 'confirmed' | 'failed';
+/**
  * Payment verification status
  */
 type PaymentStatus = 'not_found' | 'pending' | 'confirmed' | 'failed' | 'underpaid';
@@ -106,6 +114,8 @@ interface PayLink {
     multiUse?: boolean;
     /** Referral program configuration */
     referral?: ReferralConfig;
+    /** Installment payment configuration */
+    installment?: InstallmentConfig;
 }
 /**
  * Subscription configuration for a payment link
@@ -275,6 +285,131 @@ interface ReferralStats {
     conversionRate: number;
 }
 /**
+ * Installment configuration for a payment link
+ */
+interface InstallmentConfig {
+    /** Enable installment payments for this link */
+    enabled: boolean;
+    /** Total number of installments (default: 4) */
+    totalInstallments?: number;
+    /** Days between installments (default: 30) */
+    intervalDays?: number;
+    /** First payment percentage (0-100, default: 25) */
+    downPaymentPercent?: number;
+    /** Grace period in days before suspending access (default: 3) */
+    gracePeriodDays?: number;
+    /** Automatically suspend access on missed payment (default: true) */
+    autoSuspend?: boolean;
+}
+/**
+ * Installment plan entity
+ */
+interface InstallmentPlan {
+    /** Unique plan ID */
+    id: string;
+    /** Associated PayLink ID */
+    payLinkId: string;
+    /** Buyer wallet address */
+    buyerAddress: string;
+    /** Plan status */
+    status: InstallmentStatus;
+    /** Total amount to be paid */
+    totalAmount: string;
+    /** Amount paid so far */
+    paidAmount: string;
+    /** Total number of installments */
+    totalInstallments: number;
+    /** Number of completed installments */
+    completedInstallments: number;
+    /** Amount for each installment */
+    installmentAmounts: string[];
+    /** Days between payments */
+    intervalDays: number;
+    /** Grace period days */
+    gracePeriodDays: number;
+    /** Next payment due date */
+    nextDueDate: Date;
+    /** Next installment number (1-based) */
+    nextInstallmentNumber: number;
+    /** Created timestamp */
+    createdAt: Date;
+    /** Updated timestamp */
+    updatedAt: Date;
+    /** When first payment was made (access granted) */
+    activatedAt?: Date;
+    /** When all payments completed */
+    completedAt?: Date;
+    /** When plan was suspended */
+    suspendedAt?: Date;
+    /** When plan was cancelled */
+    cancelledAt?: Date;
+    /** Custom metadata */
+    metadata?: Record<string, unknown>;
+}
+/**
+ * Individual installment payment record
+ */
+interface InstallmentPayment {
+    /** Unique payment ID */
+    id: string;
+    /** Installment plan ID */
+    installmentPlanId: string;
+    /** Original payment ID (from Payment entity) */
+    paymentId: string;
+    /** PayLink ID */
+    payLinkId: string;
+    /** Buyer address */
+    buyerAddress: string;
+    /** Installment number (1-based) */
+    installmentNumber: number;
+    /** Actual amount paid */
+    amount: string;
+    /** Expected amount for this installment */
+    expectedAmount: string;
+    /** Transaction hash */
+    txHash: string;
+    /** Chain ID */
+    chainId: number;
+    /** Token symbol */
+    tokenSymbol: string;
+    /** Payment status */
+    status: InstallmentPaymentStatus;
+    /** Due date for this installment */
+    dueDate: Date;
+    /** Created timestamp */
+    createdAt: Date;
+    /** Confirmed timestamp */
+    confirmedAt?: Date;
+}
+/**
+ * Input for creating an installment plan
+ */
+interface CreateInstallmentPlanInput {
+    /** PayLink ID */
+    payLinkId: string;
+    /** Buyer wallet address */
+    buyerAddress: string;
+    /** Custom metadata */
+    metadata?: Record<string, unknown>;
+}
+/**
+ * Installment plan statistics
+ */
+interface InstallmentPlanStats {
+    /** Total plans */
+    totalPlans: number;
+    /** Active plans */
+    activePlans: number;
+    /** Completed plans */
+    completedPlans: number;
+    /** Suspended plans */
+    suspendedPlans: number;
+    /** Total amount collected */
+    totalCollected: string;
+    /** Total amount pending */
+    totalPending: string;
+}
+/**
  * Input for creating a payment link
  */
 interface CreatePayLinkInput {
@@ -299,6 +434,8 @@ interface CreatePayLinkInput {
     multiUse?: boolean;
     /** Referral program configuration */
     referral?: ReferralConfig;
+    /** Installment payment configuration */
+    installment?: InstallmentConfig;
 }
 /**
  * Input for creating a subscription
@@ -484,6 +621,21 @@ interface Storage {
     getCommissionsByReferrer(referrerAddress: string): Promise<ReferralCommission[]>;
     getPendingCommissions(referrerAddress: string): Promise<ReferralCommission[]>;
     getAllCommissions(): Promise<ReferralCommission[]>;
+    saveInstallmentPlan(plan: InstallmentPlan): Promise<void>;
+    getInstallmentPlan(id: string): Promise<InstallmentPlan | null>;
+    updateInstallmentPlan(plan: InstallmentPlan): Promise<void>;
+    getInstallmentPlanByAddress(payLinkId: string, buyerAddress: string): Promise<InstallmentPlan | null>;
+    getInstallmentPlansByPayLink(payLinkId: string): Promise<InstallmentPlan[]>;
+    getInstallmentPlansByBuyer(buyerAddress: string): Promise<InstallmentPlan[]>;
+    getOverdueInstallmentPlans(): Promise<InstallmentPlan[]>;
+    getInstallmentPlansDueBefore(date: Date): Promise<InstallmentPlan[]>;
+    getAllInstallmentPlans(): Promise<InstallmentPlan[]>;
+    saveInstallmentPayment(payment: InstallmentPayment): Promise<void>;
+    getInstallmentPayment(id: string): Promise<InstallmentPayment | null>;
+    updateInstallmentPayment(payment: InstallmentPayment): Promise<void>;
+    getInstallmentPaymentsByPlan(planId: string): Promise<InstallmentPayment[]>;
+    getInstallmentPaymentsByBuyer(buyerAddress: string): Promise<InstallmentPayment[]>;
+    getAllInstallmentPayments(): Promise<InstallmentPayment[]>;
 }
 
 /**
@@ -680,6 +832,136 @@ declare function buildReferralUrl(baseUrl: string, linkId: string, referralCode:
 declare function parseReferralCode(input: string): string | null;
 
 /**
+ * Installment (Payment Plan) Module
+ *
+ * Enables splitting payments into multiple installments.
+ * Buyer pays first installment and gets access, then pays remaining
+ * installments on schedule. Access is paused if payments are missed.
+ */
+
+/**
+ * Default installment configuration
+ */
+declare const DEFAULT_INSTALLMENT_CONFIG: InstallmentConfig;
+/**
+ * Calculate installment amounts
+ * @param totalAmount Total price amount
+ * @param totalInstallments Number of installments
+ * @param downPaymentPercent Percentage for first payment (0-100)
+ * @returns Array of amounts for each installment
+ */
+declare function calculateInstallmentAmounts(totalAmount: string, totalInstallments: number, downPaymentPercent?: number): string[];
+/**
+ * Calculate next due date based on interval
+ */
+declare function calculateNextDueDate(fromDate: Date, intervalDays: number): Date;
+/**
+ * Calculate all due dates for an installment plan
+ */
+declare function calculateDueDates(startDate: Date, totalInstallments: number, intervalDays: number): Date[];
+/**
+ * Check if an installment payment is overdue
+ */
+declare function isInstallmentOverdue(dueDate: Date, gracePeriodDays?: number): boolean;
+/**
+ * Check if a date is within grace period
+ */
+declare function isInGracePeriod(dueDate: Date, gracePeriodDays?: number): boolean;
+/**
+ * Get installment plan progress info
+ */
+declare function getInstallmentProgress(plan: InstallmentPlan): {
+    paidCount: number;
+    remainingCount: number;
+    paidAmount: string;
+    remainingAmount: string;
+    percentComplete: number;
+    isComplete: boolean;
+};
+/**
+ * Format installment schedule for display
+ */
+declare function formatInstallmentSchedule(plan: InstallmentPlan, payments: InstallmentPayment[]): Array<{
+    number: number;
+    amount: string;
+    dueDate: string;
+    status: 'paid' | 'current' | 'upcoming' | 'overdue';
+    paidAt?: string;
+    txHash?: string;
+}>;
+/**
+ * Installment Plan Manager
+ */
+declare class InstallmentManager {
+    private storage;
+    constructor(storage: Storage);
+    /**
+     * Create a new installment plan
+     */
+    createPlan(input: CreateInstallmentPlanInput): Promise<InstallmentPlan>;
+    /**
+     * Get installment plan by ID
+     */
+    getPlan(id: string): Promise<InstallmentPlan | null>;
+    /**
+     * Get plan by buyer address
+     */
+    getPlanByAddress(payLinkId: string, buyerAddress: string): Promise<InstallmentPlan | null>;
+    /**
+     * Process an installment payment
+     */
+    processPayment(planId: string, payment: Payment): Promise<InstallmentPayment>;
+    /**
+     * Confirm an installment payment
+     */
+    confirmPayment(installmentPaymentId: string): Promise<{
+        payment: InstallmentPayment;
+        plan: InstallmentPlan;
+    }>;
+    /**
+     * Suspend a plan due to missed payment
+     */
+    suspendPlan(planId: string, reason?: string): Promise<InstallmentPlan>;
+    /**
+     * Cancel an installment plan
+     */
+    cancelPlan(planId: string, reason?: string): Promise<InstallmentPlan>;
+    /**
+     * Get all payments for a plan
+     */
+    getPlanPayments(planId: string): Promise<InstallmentPayment[]>;
+    /**
+     * Get overdue plans
+     */
+    getOverduePlans(): Promise<InstallmentPlan[]>;
+    /**
+     * Get plans due soon (within N days)
+     */
+    getPlansDueSoon(withinDays?: number): Promise<InstallmentPlan[]>;
+    /**
+     * Check and suspend overdue plans
+     */
+    processOverduePlans(): Promise<InstallmentPlan[]>;
+    /**
+     * Get installment plan details with schedule
+     */
+    getPlanDetails(planId: string): Promise<{
+        plan: InstallmentPlan;
+        payments: InstallmentPayment[];
+        schedule: ReturnType<typeof formatInstallmentSchedule>;
+        progress: ReturnType<typeof getInstallmentProgress>;
+    } | null>;
+    /**
+     * Check if buyer has active access
+     */
+    hasActiveAccess(payLinkId: string, buyerAddress: string): Promise<boolean>;
+}
+/**
+ * Create an installment manager instance
+ */
+declare function createInstallmentManager(storage: Storage): InstallmentManager;
+
+/**
  * Paylink Server
  * Self-hosted paid links with blockchain payment verification
  */
@@ -691,7 +973,9 @@ declare class PaylinkServer {
     private webhookManager?;
     private subscriptionManager;
     private referralManager;
+    private installmentManager;
     private subscriptionCheckInterval?;
+    private installmentCheckInterval?;
     constructor(config: PaylinkConfig);
     /**
      * Create appropriate verifier based on chain type
@@ -721,6 +1005,10 @@ declare class PaylinkServer {
      * Get referral manager
      */
     getReferralManager(): ReferralManager;
+    /**
+     * Get installment manager
+     */
+    getInstallmentManager(): InstallmentManager;
     /**
      * Start server
      */
@@ -765,6 +1053,14 @@ declare class PaylinkServer {
      * Stop subscription check
      */
     stopSubscriptionCheck(): void;
+    /**
+     * Start periodic installment check
+     */
+    private startInstallmentCheck;
+    /**
+     * Stop installment check
+     */
+    stopInstallmentCheck(): void;
     private setupMiddleware;
     private setupRoutes;
     private authMiddleware;
@@ -806,6 +1102,15 @@ declare class PaylinkServer {
     private apiListCommissions;
     private apiGetPendingCommissions;
     private apiMarkCommissionPaid;
+    private apiCreateInstallmentPlan;
+    private apiListInstallmentPlans;
+    private apiGetInstallmentPlan;
+    private apiGetInstallmentSchedule;
+    private apiProcessInstallmentPayment;
+    private apiSuspendInstallmentPlan;
+    private apiCancelInstallmentPlan;
+    private apiGetBuyerInstallments;
+    private apiGetOverdueInstallments;
     private send402;
     private send403;
 }
@@ -834,6 +1139,13 @@ declare class MemoryStorage implements Storage {
     private commissions;
     private commissionsByReferral;
     private commissionsByReferrer;
+    private installmentPlans;
+    private installmentPlansByAddress;
+    private installmentPlansByLink;
+    private installmentPlansByBuyer;
+    private installmentPayments;
+    private installmentPaymentsByPlan;
+    private installmentPaymentsByBuyer;
     getPayLink(id: string): Promise<PayLink | null>;
     savePayLink(payLink: PayLink): Promise<void>;
     updatePayLink(payLink: PayLink): Promise<void>;
@@ -866,6 +1178,21 @@ declare class MemoryStorage implements Storage {
     getCommissionsByReferrer(referrerAddress: string): Promise<ReferralCommission[]>;
     getPendingCommissions(referrerAddress: string): Promise<ReferralCommission[]>;
     getAllCommissions(): Promise<ReferralCommission[]>;
+    saveInstallmentPlan(plan: InstallmentPlan): Promise<void>;
+    getInstallmentPlan(id: string): Promise<InstallmentPlan | null>;
+    updateInstallmentPlan(plan: InstallmentPlan): Promise<void>;
+    getInstallmentPlanByAddress(payLinkId: string, buyerAddress: string): Promise<InstallmentPlan | null>;
+    getInstallmentPlansByPayLink(payLinkId: string): Promise<InstallmentPlan[]>;
+    getInstallmentPlansByBuyer(buyerAddress: string): Promise<InstallmentPlan[]>;
+    getOverdueInstallmentPlans(): Promise<InstallmentPlan[]>;
+    getInstallmentPlansDueBefore(date: Date): Promise<InstallmentPlan[]>;
+    getAllInstallmentPlans(): Promise<InstallmentPlan[]>;
+    saveInstallmentPayment(payment: InstallmentPayment): Promise<void>;
+    getInstallmentPayment(id: string): Promise<InstallmentPayment | null>;
+    updateInstallmentPayment(payment: InstallmentPayment): Promise<void>;
+    getInstallmentPaymentsByPlan(planId: string): Promise<InstallmentPayment[]>;
+    getInstallmentPaymentsByBuyer(buyerAddress: string): Promise<InstallmentPayment[]>;
+    getAllInstallmentPayments(): Promise<InstallmentPayment[]>;
     /** Clear all data */
     clear(): void;
 }
@@ -1050,7 +1377,7 @@ interface WebhookConfig {
 /**
  * Webhook event types
  */
-type WebhookEvent = 'payment.confirmed' | 'payment.pending' | 'payment.failed' | 'payment.underpaid' | 'link.created' | 'link.disabled' | 'link.expired' | 'subscription.created' | 'subscription.renewed' | 'subscription.cancelled' | 'subscription.paused' | 'subscription.resumed' | 'subscription.past_due' | 'subscription.expired' | 'subscription.trial_ending' | 'subscription.payment_due' | 'referral.created' | 'referral.disabled' | 'commission.pending' | 'commission.confirmed' | 'commission.paid';
+type WebhookEvent = 'payment.confirmed' | 'payment.pending' | 'payment.failed' | 'payment.underpaid' | 'link.created' | 'link.disabled' | 'link.expired' | 'subscription.created' | 'subscription.renewed' | 'subscription.cancelled' | 'subscription.paused' | 'subscription.resumed' | 'subscription.past_due' | 'subscription.expired' | 'subscription.trial_ending' | 'subscription.payment_due' | 'referral.created' | 'referral.disabled' | 'commission.pending' | 'commission.confirmed' | 'commission.paid' | 'installment.plan_created' | 'installment.payment_received' | 'installment.payment_confirmed' | 'installment.plan_activated' | 'installment.plan_completed' | 'installment.plan_suspended' | 'installment.plan_cancelled' | 'installment.payment_due' | 'installment.payment_overdue';
 /**
  * Webhook payload base
  */
@@ -1062,7 +1389,7 @@ interface WebhookPayload {
     /** Unique event ID */
     eventId: string;
     /** Event data */
-    data: WebhookPaymentData | WebhookLinkData | WebhookSubscriptionData | WebhookReferralData | WebhookCommissionData;
+    data: WebhookPaymentData | WebhookLinkData | WebhookSubscriptionData | WebhookReferralData | WebhookCommissionData | WebhookInstallmentData;
 }
 /**
  * Payment event data
@@ -1213,6 +1540,55 @@ interface WebhookCommissionData {
     };
 }
 /**
+ * Installment event data
+ */
+interface WebhookInstallmentData {
+    type: 'installment';
+    plan: {
+        id: string;
+        payLinkId: string;
+        buyerAddress: string;
+        status: string;
+        totalAmount: string;
+        paidAmount: string;
+        totalInstallments: number;
+        completedInstallments: number;
+        nextDueDate: string;
+        nextInstallmentNumber: number;
+        createdAt: string;
+        activatedAt?: string;
+        completedAt?: string;
+        suspendedAt?: string;
+        cancelledAt?: string;
+    };
+    payment?: {
+        id: string;
+        installmentNumber: number;
+        amount: string;
+        expectedAmount: string;
+        txHash: string;
+        status: string;
+        dueDate: string;
+        createdAt: string;
+        confirmedAt?: string;
+    };
+    payLink: {
+        id: string;
+        targetUrl: string;
+        price: {
+            amount: string;
+            tokenSymbol: string;
+            chainId: number;
+        };
+        recipientAddress: string;
+        installment?: {
+            totalInstallments?: number;
+            intervalDays?: number;
+            downPaymentPercent?: number;
+        };
+    };
+}
+/**
  * Webhook delivery result
  */
 interface WebhookResult {
@@ -1255,6 +1631,10 @@ declare class WebhookManager {
      * Send commission event
      */
     sendCommissionEvent(event: WebhookEvent, commission: ReferralCommission, referral: Referral, payLink: PayLink): Promise<WebhookResult | null>;
+    /**
+     * Send installment event
+     */
+    sendInstallmentEvent(event: WebhookEvent, plan: InstallmentPlan, payLink: PayLink, payment?: InstallmentPayment): Promise<WebhookResult | null>;
     /**
      * Queue event for async delivery
      */
@@ -1448,4 +1828,4 @@ declare function compareAmounts(a: string, b: string): number;
  */
 declare const REASON_MESSAGES: Record<string, string>;
 
-export { type ChainConfig, type ChainType, ChainVerifier, type CreatePayLinkInput, type CreateReferralInput, type CreateSubscriptionInput, DEFAULT_DISCOUNT_TIERS, DEFAULT_REFERRAL_CONFIG, type DiscountTier, MemoryStorage, MockSolanaVerifier, MockVerifier, type MultiPrice, PAYLINK_TOKEN, type PayLink, type PayLinkStatus, type PaylinkConfig, PaylinkServer, type PaylinkTokenConfig, PaylinkTokenManager, type Payment, type PaymentCheckResult, type PaymentOption, type PaymentQRData, type PaymentStatus, type Price, type Protocol402Response, type Protocol403Response, type QRCodeOptions, REASON_MESSAGES, ReasonCode, type Referral, type ReferralCommission, type ReferralConfig, ReferralManager, type ReferralStats, type ReferralStatus, SOLANA_CHAIN_IDS, type SolanaConfig, SolanaVerifier, type Storage, type Subscription, type SubscriptionConfig, type SubscriptionInterval, SubscriptionManager, type SubscriptionStatus, type WebhookCommissionData, type WebhookConfig, type WebhookConfigType, type WebhookEvent, type WebhookLinkData, WebhookManager, type WebhookPayload, type WebhookPaymentData, type WebhookReferralData, type WebhookResult, type WebhookSubscriptionData, buildReferralUrl, calculateCommission, calculateNextBillingDate, compareAmounts, createPaylinkTokenManager, createReferralManager, createServer, createSolanaVerifier, createSubscriptionManager, createWebhookManager, formatPaylinkAmount, generateId, generateNonce, generatePaymentQR, generatePaymentURI, generateQRCodeDataURL, generateQRCodeSVG, generateReferralCode, generateUUID, getIntervalDisplayName, isCommissionExpired, isExpired, isInTrialPeriod, isLimitReached, isPaylinkToken, isPaymentDue, isValidReferralCode, isWithinGracePeriod, parseReferralCode, sign, verifyWebhookSignature };
+export { type ChainConfig, type ChainType, ChainVerifier, type CreateInstallmentPlanInput, type CreatePayLinkInput, type CreateReferralInput, type CreateSubscriptionInput, DEFAULT_DISCOUNT_TIERS, DEFAULT_INSTALLMENT_CONFIG, DEFAULT_REFERRAL_CONFIG, type DiscountTier, type InstallmentConfig, InstallmentManager, type InstallmentPayment, type InstallmentPaymentStatus, type InstallmentPlan, type InstallmentPlanStats, type InstallmentStatus, MemoryStorage, MockSolanaVerifier, MockVerifier, type MultiPrice, PAYLINK_TOKEN, type PayLink, type PayLinkStatus, type PaylinkConfig, PaylinkServer, type PaylinkTokenConfig, PaylinkTokenManager, type Payment, type PaymentCheckResult, type PaymentOption, type PaymentQRData, type PaymentStatus, type Price, type Protocol402Response, type Protocol403Response, type QRCodeOptions, REASON_MESSAGES, ReasonCode, type Referral, type ReferralCommission, type ReferralConfig, ReferralManager, type ReferralStats, type ReferralStatus, SOLANA_CHAIN_IDS, type SolanaConfig, SolanaVerifier, type Storage, type Subscription, type SubscriptionConfig, type SubscriptionInterval, SubscriptionManager, type SubscriptionStatus, type WebhookCommissionData, type WebhookConfig, type WebhookConfigType, type WebhookEvent, type WebhookInstallmentData, type WebhookLinkData, WebhookManager, type WebhookPayload, type WebhookPaymentData, type WebhookReferralData, type WebhookResult, type WebhookSubscriptionData, buildReferralUrl, calculateCommission, calculateDueDates, calculateInstallmentAmounts, calculateNextBillingDate, calculateNextDueDate, compareAmounts, createInstallmentManager, createPaylinkTokenManager, createReferralManager, createServer, createSolanaVerifier, createSubscriptionManager, createWebhookManager, formatInstallmentSchedule, formatPaylinkAmount, generateId, generateNonce, generatePaymentQR, generatePaymentURI, generateQRCodeDataURL, generateQRCodeSVG, generateReferralCode, generateUUID, getInstallmentProgress, getIntervalDisplayName, isCommissionExpired, isExpired, isInGracePeriod, isInTrialPeriod, isInstallmentOverdue, isLimitReached, isPaylinkToken, isPaymentDue, isValidReferralCode, isWithinGracePeriod, parseReferralCode, sign, verifyWebhookSignature };

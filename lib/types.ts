@@ -9,6 +9,16 @@ export type PayLinkStatus = 'active' | 'disabled' | 'expired';
 export type ReferralStatus = 'pending' | 'confirmed' | 'paid' | 'expired';
 
 /**
+ * Installment plan status
+ */
+export type InstallmentStatus = 'pending' | 'active' | 'suspended' | 'completed' | 'cancelled';
+
+/**
+ * Installment payment status
+ */
+export type InstallmentPaymentStatus = 'pending' | 'confirmed' | 'failed';
+
+/**
  * Payment verification status
  */
 export type PaymentStatus = 'not_found' | 'pending' | 'confirmed' | 'failed' | 'underpaid';
@@ -115,6 +125,8 @@ export interface PayLink {
   multiUse?: boolean;
   /** Referral program configuration */
   referral?: ReferralConfig;
+  /** Installment payment configuration */
+  installment?: InstallmentConfig;
 }
 
 /**
@@ -293,6 +305,136 @@ export interface ReferralStats {
 }
 
 /**
+ * Installment configuration for a payment link
+ */
+export interface InstallmentConfig {
+  /** Enable installment payments for this link */
+  enabled: boolean;
+  /** Total number of installments (default: 4) */
+  totalInstallments?: number;
+  /** Days between installments (default: 30) */
+  intervalDays?: number;
+  /** First payment percentage (0-100, default: 25) */
+  downPaymentPercent?: number;
+  /** Grace period in days before suspending access (default: 3) */
+  gracePeriodDays?: number;
+  /** Automatically suspend access on missed payment (default: true) */
+  autoSuspend?: boolean;
+}
+
+/**
+ * Installment plan entity
+ */
+export interface InstallmentPlan {
+  /** Unique plan ID */
+  id: string;
+  /** Associated PayLink ID */
+  payLinkId: string;
+  /** Buyer wallet address */
+  buyerAddress: string;
+  /** Plan status */
+  status: InstallmentStatus;
+  /** Total amount to be paid */
+  totalAmount: string;
+  /** Amount paid so far */
+  paidAmount: string;
+  /** Total number of installments */
+  totalInstallments: number;
+  /** Number of completed installments */
+  completedInstallments: number;
+  /** Amount for each installment */
+  installmentAmounts: string[];
+  /** Days between payments */
+  intervalDays: number;
+  /** Grace period days */
+  gracePeriodDays: number;
+  /** Next payment due date */
+  nextDueDate: Date;
+  /** Next installment number (1-based) */
+  nextInstallmentNumber: number;
+  /** Created timestamp */
+  createdAt: Date;
+  /** Updated timestamp */
+  updatedAt: Date;
+  /** When first payment was made (access granted) */
+  activatedAt?: Date;
+  /** When all payments completed */
+  completedAt?: Date;
+  /** When plan was suspended */
+  suspendedAt?: Date;
+  /** When plan was cancelled */
+  cancelledAt?: Date;
+  /** Custom metadata */
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Individual installment payment record
+ */
+export interface InstallmentPayment {
+  /** Unique payment ID */
+  id: string;
+  /** Installment plan ID */
+  installmentPlanId: string;
+  /** Original payment ID (from Payment entity) */
+  paymentId: string;
+  /** PayLink ID */
+  payLinkId: string;
+  /** Buyer address */
+  buyerAddress: string;
+  /** Installment number (1-based) */
+  installmentNumber: number;
+  /** Actual amount paid */
+  amount: string;
+  /** Expected amount for this installment */
+  expectedAmount: string;
+  /** Transaction hash */
+  txHash: string;
+  /** Chain ID */
+  chainId: number;
+  /** Token symbol */
+  tokenSymbol: string;
+  /** Payment status */
+  status: InstallmentPaymentStatus;
+  /** Due date for this installment */
+  dueDate: Date;
+  /** Created timestamp */
+  createdAt: Date;
+  /** Confirmed timestamp */
+  confirmedAt?: Date;
+}
+
+/**
+ * Input for creating an installment plan
+ */
+export interface CreateInstallmentPlanInput {
+  /** PayLink ID */
+  payLinkId: string;
+  /** Buyer wallet address */
+  buyerAddress: string;
+  /** Custom metadata */
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Installment plan statistics
+ */
+export interface InstallmentPlanStats {
+  /** Total plans */
+  totalPlans: number;
+  /** Active plans */
+  activePlans: number;
+  /** Completed plans */
+  completedPlans: number;
+  /** Suspended plans */
+  suspendedPlans: number;
+  /** Total amount collected */
+  totalCollected: string;
+  /** Total amount pending */
+  totalPending: string;
+}
+
+/**
  * Input for creating a payment link
  */
 export interface CreatePayLinkInput {
@@ -317,6 +459,8 @@ export interface CreatePayLinkInput {
   multiUse?: boolean;
   /** Referral program configuration */
   referral?: ReferralConfig;
+  /** Installment payment configuration */
+  installment?: InstallmentConfig;
 }
 
 /**
@@ -534,4 +678,23 @@ export interface Storage {
   getCommissionsByReferrer(referrerAddress: string): Promise<ReferralCommission[]>;
   getPendingCommissions(referrerAddress: string): Promise<ReferralCommission[]>;
   getAllCommissions(): Promise<ReferralCommission[]>;
+
+  // Installment plan methods
+  saveInstallmentPlan(plan: InstallmentPlan): Promise<void>;
+  getInstallmentPlan(id: string): Promise<InstallmentPlan | null>;
+  updateInstallmentPlan(plan: InstallmentPlan): Promise<void>;
+  getInstallmentPlanByAddress(payLinkId: string, buyerAddress: string): Promise<InstallmentPlan | null>;
+  getInstallmentPlansByPayLink(payLinkId: string): Promise<InstallmentPlan[]>;
+  getInstallmentPlansByBuyer(buyerAddress: string): Promise<InstallmentPlan[]>;
+  getOverdueInstallmentPlans(): Promise<InstallmentPlan[]>;
+  getInstallmentPlansDueBefore(date: Date): Promise<InstallmentPlan[]>;
+  getAllInstallmentPlans(): Promise<InstallmentPlan[]>;
+
+  // Installment payment methods
+  saveInstallmentPayment(payment: InstallmentPayment): Promise<void>;
+  getInstallmentPayment(id: string): Promise<InstallmentPayment | null>;
+  updateInstallmentPayment(payment: InstallmentPayment): Promise<void>;
+  getInstallmentPaymentsByPlan(planId: string): Promise<InstallmentPayment[]>;
+  getInstallmentPaymentsByBuyer(buyerAddress: string): Promise<InstallmentPayment[]>;
+  getAllInstallmentPayments(): Promise<InstallmentPayment[]>;
 }

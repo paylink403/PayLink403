@@ -2,6 +2,146 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.7.0] - 2024-12-01
+
+### Added
+
+- **Installment Payments (Payment Plans)**: Split large payments into multiple installments
+  - Buyers pay first installment and get immediate access
+  - Remaining installments paid on schedule (e.g., monthly)
+  - Access suspended if payments are missed
+  - Automatic reactivation when overdue payment is made
+  - Configurable down payment percentage (default: 25%)
+  - Configurable grace period before suspension (default: 3 days)
+
+- **New Types**:
+  - `InstallmentPlan` - Installment plan entity with tracking
+  - `InstallmentPayment` - Individual installment payment records
+  - `InstallmentConfig` - Configuration for installment links
+  - `InstallmentStatus` - Plan status (pending/active/suspended/completed/cancelled)
+  - `InstallmentPaymentStatus` - Payment status (pending/confirmed/failed)
+  - `CreateInstallmentPlanInput` - Input for creating plans
+  - `InstallmentPlanStats` - Statistics for installment plans
+
+- **InstallmentManager**:
+  - `createPlan()` - Create new installment plan
+  - `getPlan()` - Get plan by ID
+  - `getPlanByAddress()` - Get plan by buyer address
+  - `processPayment()` - Process installment payment
+  - `confirmPayment()` - Confirm pending payment
+  - `suspendPlan()` - Suspend plan for missed payments
+  - `cancelPlan()` - Cancel installment plan
+  - `getPlanPayments()` - Get all payments for a plan
+  - `getOverduePlans()` - Get overdue plans
+  - `getPlansDueSoon()` - Get plans due within N days
+  - `getPlanDetails()` - Get full plan details with schedule
+  - `hasActiveAccess()` - Check if buyer has active access
+
+- **Utility Functions**:
+  - `calculateInstallmentAmounts()` - Calculate amount for each installment
+  - `calculateNextDueDate()` - Calculate next payment due date
+  - `calculateDueDates()` - Calculate all due dates for plan
+  - `isInstallmentOverdue()` - Check if payment is overdue
+  - `isInGracePeriod()` - Check if within grace period
+  - `getInstallmentProgress()` - Get plan progress info
+  - `formatInstallmentSchedule()` - Format schedule for display
+
+- **Webhook Events**:
+  - `installment.plan_created` - New plan created
+  - `installment.payment_received` - Payment received
+  - `installment.payment_confirmed` - Payment confirmed
+  - `installment.plan_activated` - Plan activated (first payment)
+  - `installment.plan_completed` - All payments completed
+  - `installment.plan_suspended` - Plan suspended (missed payment)
+  - `installment.plan_cancelled` - Plan cancelled
+  - `installment.payment_due` - Payment due reminder
+  - `installment.payment_overdue` - Payment overdue notification
+
+### API Changes
+
+- `POST /api/links` now accepts `installment` configuration:
+  ```json
+  {
+    "installment": {
+      "enabled": true,
+      "totalInstallments": 4,
+      "intervalDays": 30,
+      "downPaymentPercent": 25,
+      "gracePeriodDays": 3,
+      "autoSuspend": true
+    }
+  }
+  ```
+
+### New Admin Endpoints
+
+| Method | URL | Description |
+|--------|-----|-------------|
+| POST | `/api/installments` | Create installment plan |
+| GET | `/api/installments` | List installment plans |
+| GET | `/api/installments/:id` | Get plan details |
+| GET | `/api/installments/:id/schedule` | Get payment schedule |
+| POST | `/api/installments/:id/payment` | Process payment |
+| POST | `/api/installments/:id/suspend` | Suspend plan |
+| POST | `/api/installments/:id/cancel` | Cancel plan |
+| GET | `/api/installments/buyer/:address` | Get buyer's plans |
+| GET | `/api/installments/overdue` | Get overdue plans |
+
+### Storage Interface Changes
+
+- Added installment plan methods:
+  - `saveInstallmentPlan()`, `getInstallmentPlan()`, `updateInstallmentPlan()`
+  - `getInstallmentPlanByAddress()`, `getInstallmentPlansByPayLink()`
+  - `getInstallmentPlansByBuyer()`, `getOverdueInstallmentPlans()`
+  - `getInstallmentPlansDueBefore()`, `getAllInstallmentPlans()`
+
+- Added installment payment methods:
+  - `saveInstallmentPayment()`, `getInstallmentPayment()`, `updateInstallmentPayment()`
+  - `getInstallmentPaymentsByPlan()`, `getInstallmentPaymentsByBuyer()`
+  - `getAllInstallmentPayments()`
+
+### Example Usage
+
+```javascript
+// Create link with installment option
+const link = await server.createPayLink({
+  targetUrl: 'https://course.example.com',
+  price: { amount: '2', tokenSymbol: 'SOL', chainId: 101 },
+  recipientAddress: 'YOUR_WALLET',
+  installment: {
+    enabled: true,
+    totalInstallments: 4,     // Split into 4 payments
+    intervalDays: 30,         // Monthly payments
+    downPaymentPercent: 25,   // 25% down, rest split evenly
+    gracePeriodDays: 3,       // 3 days grace before suspension
+    autoSuspend: true
+  }
+});
+
+// Create installment plan for buyer
+const plan = await installmentManager.createPlan({
+  payLinkId: link.id,
+  buyerAddress: 'BUYER_WALLET'
+});
+// Returns: {
+//   id: 'plan_xxx',
+//   totalAmount: '2',
+//   totalInstallments: 4,
+//   installmentAmounts: ['0.5', '0.5', '0.5', '0.5'],
+//   nextDueDate: '2024-12-01',
+//   status: 'pending'
+// }
+
+// Process first payment → buyer gets access
+POST /api/installments/:planId/payment
+{ "txHash": "0x...", "chainId": 101 }
+// Returns: { status: 'active', completedInstallments: 1 }
+
+// Check schedule
+GET /api/installments/:planId/schedule
+// Returns full payment schedule with status per installment
+```
+
 ## [1.6.0] - 2024-12-01
 
 ### Added

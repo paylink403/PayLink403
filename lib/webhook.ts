@@ -1,5 +1,5 @@
 import { createHmac } from 'crypto';
-import type { PayLink, Payment, Subscription, Referral, ReferralCommission } from './types.js';
+import type { PayLink, Payment, Subscription, Referral, ReferralCommission, InstallmentPlan, InstallmentPayment } from './types.js';
 
 /**
  * Webhook configuration
@@ -43,7 +43,16 @@ export type WebhookEvent =
   | 'referral.disabled'
   | 'commission.pending'
   | 'commission.confirmed'
-  | 'commission.paid';
+  | 'commission.paid'
+  | 'installment.plan_created'
+  | 'installment.payment_received'
+  | 'installment.payment_confirmed'
+  | 'installment.plan_activated'
+  | 'installment.plan_completed'
+  | 'installment.plan_suspended'
+  | 'installment.plan_cancelled'
+  | 'installment.payment_due'
+  | 'installment.payment_overdue';
 
 /**
  * Webhook payload base
@@ -56,7 +65,7 @@ export interface WebhookPayload {
   /** Unique event ID */
   eventId: string;
   /** Event data */
-  data: WebhookPaymentData | WebhookLinkData | WebhookSubscriptionData | WebhookReferralData | WebhookCommissionData;
+  data: WebhookPaymentData | WebhookLinkData | WebhookSubscriptionData | WebhookReferralData | WebhookCommissionData | WebhookInstallmentData;
 }
 
 /**
@@ -213,6 +222,56 @@ export interface WebhookCommissionData {
 }
 
 /**
+ * Installment event data
+ */
+export interface WebhookInstallmentData {
+  type: 'installment';
+  plan: {
+    id: string;
+    payLinkId: string;
+    buyerAddress: string;
+    status: string;
+    totalAmount: string;
+    paidAmount: string;
+    totalInstallments: number;
+    completedInstallments: number;
+    nextDueDate: string;
+    nextInstallmentNumber: number;
+    createdAt: string;
+    activatedAt?: string;
+    completedAt?: string;
+    suspendedAt?: string;
+    cancelledAt?: string;
+  };
+  payment?: {
+    id: string;
+    installmentNumber: number;
+    amount: string;
+    expectedAmount: string;
+    txHash: string;
+    status: string;
+    dueDate: string;
+    createdAt: string;
+    confirmedAt?: string;
+  };
+  payLink: {
+    id: string;
+    targetUrl: string;
+    price: {
+      amount: string;
+      tokenSymbol: string;
+      chainId: number;
+    };
+    recipientAddress: string;
+    installment?: {
+      totalInstallments?: number;
+      intervalDays?: number;
+      downPaymentPercent?: number;
+    };
+  };
+}
+
+/**
  * Webhook delivery result
  */
 export interface WebhookResult {
@@ -260,6 +319,15 @@ export class WebhookManager {
         'commission.pending',
         'commission.confirmed',
         'commission.paid',
+        'installment.plan_created',
+        'installment.payment_received',
+        'installment.payment_confirmed',
+        'installment.plan_activated',
+        'installment.plan_completed',
+        'installment.plan_suspended',
+        'installment.plan_cancelled',
+        'installment.payment_due',
+        'installment.payment_overdue',
       ],
       timeout: config.timeout ?? 10000,
       retries: config.retries ?? 3,
@@ -485,6 +553,70 @@ export class WebhookManager {
           targetUrl: payLink.targetUrl,
           price: payLink.price,
           recipientAddress: payLink.recipientAddress,
+        },
+      },
+    };
+
+    return this.send(payload);
+  }
+
+  /**
+   * Send installment event
+   */
+  async sendInstallmentEvent(
+    event: WebhookEvent,
+    plan: InstallmentPlan,
+    payLink: PayLink,
+    payment?: InstallmentPayment
+  ): Promise<WebhookResult | null> {
+    if (!this.isEventEnabled(event)) {
+      return null;
+    }
+
+    const payload: WebhookPayload = {
+      event,
+      timestamp: new Date().toISOString(),
+      eventId: this.generateEventId(),
+      data: {
+        type: 'installment',
+        plan: {
+          id: plan.id,
+          payLinkId: plan.payLinkId,
+          buyerAddress: plan.buyerAddress,
+          status: plan.status,
+          totalAmount: plan.totalAmount,
+          paidAmount: plan.paidAmount,
+          totalInstallments: plan.totalInstallments,
+          completedInstallments: plan.completedInstallments,
+          nextDueDate: plan.nextDueDate.toISOString(),
+          nextInstallmentNumber: plan.nextInstallmentNumber,
+          createdAt: plan.createdAt.toISOString(),
+          activatedAt: plan.activatedAt?.toISOString(),
+          completedAt: plan.completedAt?.toISOString(),
+          suspendedAt: plan.suspendedAt?.toISOString(),
+          cancelledAt: plan.cancelledAt?.toISOString(),
+        },
+        payment: payment ? {
+          id: payment.id,
+          installmentNumber: payment.installmentNumber,
+          amount: payment.amount,
+          expectedAmount: payment.expectedAmount,
+          txHash: payment.txHash,
+          status: payment.status,
+          dueDate: payment.dueDate.toISOString(),
+          createdAt: payment.createdAt.toISOString(),
+          confirmedAt: payment.confirmedAt?.toISOString(),
+        } : undefined,
+        payLink: {
+          id: payLink.id,
+          targetUrl: payLink.targetUrl,
+          price: payLink.price,
+          recipientAddress: payLink.recipientAddress,
+          installment: payLink.installment ? {
+            totalInstallments: payLink.installment.totalInstallments,
+            intervalDays: payLink.installment.intervalDays,
+            downPaymentPercent: payLink.installment.downPaymentPercent,
+          } : undefined,
         },
       },
     };

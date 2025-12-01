@@ -1,4 +1,4 @@
-import type { Storage, PayLink, Payment, Subscription, Referral, ReferralCommission } from './types.js';
+import type { Storage, PayLink, Payment, Subscription, Referral, ReferralCommission, InstallmentPlan, InstallmentPayment } from './types.js';
 
 /**
  * In-memory storage implementation
@@ -20,6 +20,13 @@ export class MemoryStorage implements Storage {
   private commissions = new Map<string, ReferralCommission>();
   private commissionsByReferral = new Map<string, ReferralCommission[]>();
   private commissionsByReferrer = new Map<string, ReferralCommission[]>();
+  private installmentPlans = new Map<string, InstallmentPlan>();
+  private installmentPlansByAddress = new Map<string, InstallmentPlan>();
+  private installmentPlansByLink = new Map<string, InstallmentPlan[]>();
+  private installmentPlansByBuyer = new Map<string, InstallmentPlan[]>();
+  private installmentPayments = new Map<string, InstallmentPayment>();
+  private installmentPaymentsByPlan = new Map<string, InstallmentPayment[]>();
+  private installmentPaymentsByBuyer = new Map<string, InstallmentPayment[]>();
 
   async getPayLink(id: string): Promise<PayLink | null> {
     return this.links.get(id) ?? null;
@@ -281,6 +288,168 @@ export class MemoryStorage implements Storage {
     return Array.from(this.commissions.values());
   }
 
+  // Installment plan methods
+
+  async saveInstallmentPlan(plan: InstallmentPlan): Promise<void> {
+    this.installmentPlans.set(plan.id, { ...plan });
+
+    // Index by address
+    const addressKey = `${plan.payLinkId}:${plan.buyerAddress.toLowerCase()}`;
+    this.installmentPlansByAddress.set(addressKey, plan);
+
+    // Index by link
+    const linkPlans = this.installmentPlansByLink.get(plan.payLinkId) ?? [];
+    linkPlans.push(plan);
+    this.installmentPlansByLink.set(plan.payLinkId, linkPlans);
+
+    // Index by buyer
+    const buyerKey = plan.buyerAddress.toLowerCase();
+    const buyerPlans = this.installmentPlansByBuyer.get(buyerKey) ?? [];
+    buyerPlans.push(plan);
+    this.installmentPlansByBuyer.set(buyerKey, buyerPlans);
+  }
+
+  async getInstallmentPlan(id: string): Promise<InstallmentPlan | null> {
+    return this.installmentPlans.get(id) ?? null;
+  }
+
+  async updateInstallmentPlan(plan: InstallmentPlan): Promise<void> {
+    if (!this.installmentPlans.has(plan.id)) {
+      throw new Error(`Installment plan ${plan.id} not found`);
+    }
+
+    const updated = { ...plan, updatedAt: new Date() };
+    this.installmentPlans.set(plan.id, updated);
+
+    // Update address index
+    const addressKey = `${plan.payLinkId}:${plan.buyerAddress.toLowerCase()}`;
+    this.installmentPlansByAddress.set(addressKey, updated);
+
+    // Update link index
+    const linkPlans = this.installmentPlansByLink.get(plan.payLinkId) ?? [];
+    const linkIdx = linkPlans.findIndex(p => p.id === plan.id);
+    if (linkIdx !== -1) {
+      linkPlans[linkIdx] = updated;
+    }
+
+    // Update buyer index
+    const buyerKey = plan.buyerAddress.toLowerCase();
+    const buyerPlans = this.installmentPlansByBuyer.get(buyerKey) ?? [];
+    const buyerIdx = buyerPlans.findIndex(p => p.id === plan.id);
+    if (buyerIdx !== -1) {
+      buyerPlans[buyerIdx] = updated;
+    }
+  }
+
+  async getInstallmentPlanByAddress(
+    payLinkId: string,
+    buyerAddress: string
+  ): Promise<InstallmentPlan | null> {
+    const addressKey = `${payLinkId}:${buyerAddress.toLowerCase()}`;
+    return this.installmentPlansByAddress.get(addressKey) ?? null;
+  }
+
+  async getInstallmentPlansByPayLink(payLinkId: string): Promise<InstallmentPlan[]> {
+    return this.installmentPlansByLink.get(payLinkId) ?? [];
+  }
+
+  async getInstallmentPlansByBuyer(buyerAddress: string): Promise<InstallmentPlan[]> {
+    return this.installmentPlansByBuyer.get(buyerAddress.toLowerCase()) ?? [];
+  }
+
+  async getOverdueInstallmentPlans(): Promise<InstallmentPlan[]> {
+    const now = new Date();
+    const result: InstallmentPlan[] = [];
+
+    for (const plan of this.installmentPlans.values()) {
+      if (plan.status === 'active') {
+        const graceEnd = new Date(plan.nextDueDate);
+        graceEnd.setDate(graceEnd.getDate() + plan.gracePeriodDays);
+        
+        if (now > graceEnd) {
+          result.push(plan);
+        }
+      }
+    }
+
+    return result;
+  }
+
+  async getInstallmentPlansDueBefore(date: Date): Promise<InstallmentPlan[]> {
+    const result: InstallmentPlan[] = [];
+
+    for (const plan of this.installmentPlans.values()) {
+      if (
+        (plan.status === 'active' || plan.status === 'pending') &&
+        plan.nextDueDate <= date
+      ) {
+        result.push(plan);
+      }
+    }
+
+    return result;
+  }
+
+  async getAllInstallmentPlans(): Promise<InstallmentPlan[]> {
+    return Array.from(this.installmentPlans.values());
+  }
+
+  // Installment payment methods
+
+  async saveInstallmentPayment(payment: InstallmentPayment): Promise<void> {
+    this.installmentPayments.set(payment.id, { ...payment });
+
+    // Index by plan
+    const planPayments = this.installmentPaymentsByPlan.get(payment.installmentPlanId) ?? [];
+    planPayments.push(payment);
+    this.installmentPaymentsByPlan.set(payment.installmentPlanId, planPayments);
+
+    // Index by buyer
+    const buyerKey = payment.buyerAddress.toLowerCase();
+    const buyerPayments = this.installmentPaymentsByBuyer.get(buyerKey) ?? [];
+    buyerPayments.push(payment);
+    this.installmentPaymentsByBuyer.set(buyerKey, buyerPayments);
+  }
+
+  async getInstallmentPayment(id: string): Promise<InstallmentPayment | null> {
+    return this.installmentPayments.get(id) ?? null;
+  }
+
+  async updateInstallmentPayment(payment: InstallmentPayment): Promise<void> {
+    if (!this.installmentPayments.has(payment.id)) {
+      throw new Error(`Installment payment ${payment.id} not found`);
+    }
+
+    this.installmentPayments.set(payment.id, { ...payment });
+
+    // Update plan index
+    const planPayments = this.installmentPaymentsByPlan.get(payment.installmentPlanId) ?? [];
+    const planIdx = planPayments.findIndex(p => p.id === payment.id);
+    if (planIdx !== -1) {
+      planPayments[planIdx] = payment;
+    }
+
+    // Update buyer index
+    const buyerKey = payment.buyerAddress.toLowerCase();
+    const buyerPayments = this.installmentPaymentsByBuyer.get(buyerKey) ?? [];
+    const buyerIdx = buyerPayments.findIndex(p => p.id === payment.id);
+    if (buyerIdx !== -1) {
+      buyerPayments[buyerIdx] = payment;
+    }
+  }
+
+  async getInstallmentPaymentsByPlan(planId: string): Promise<InstallmentPayment[]> {
+    return this.installmentPaymentsByPlan.get(planId) ?? [];
+  }
+
+  async getInstallmentPaymentsByBuyer(buyerAddress: string): Promise<InstallmentPayment[]> {
+    return this.installmentPaymentsByBuyer.get(buyerAddress.toLowerCase()) ?? [];
+  }
+
+  async getAllInstallmentPayments(): Promise<InstallmentPayment[]> {
+    return Array.from(this.installmentPayments.values());
+  }
+
   /** Clear all data */
   clear(): void {
     this.links.clear();
@@ -298,5 +467,12 @@ export class MemoryStorage implements Storage {
     this.commissions.clear();
     this.commissionsByReferral.clear();
     this.commissionsByReferrer.clear();
+    this.installmentPlans.clear();
+    this.installmentPlansByAddress.clear();
+    this.installmentPlansByLink.clear();
+    this.installmentPlansByBuyer.clear();
+    this.installmentPayments.clear();
+    this.installmentPaymentsByPlan.clear();
+    this.installmentPaymentsByBuyer.clear();
   }
 }

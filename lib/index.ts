@@ -32,6 +32,14 @@ export type {
   ReferralStats,
   ReferralStatus,
   CreateReferralInput,
+  // Installment types
+  InstallmentPlan,
+  InstallmentPayment,
+  InstallmentConfig,
+  InstallmentStatus,
+  InstallmentPaymentStatus,
+  CreateInstallmentPlanInput,
+  InstallmentPlanStats,
 } from './types.js';
 
 export { ReasonCode, SOLANA_CHAIN_IDS } from './types.js';
@@ -71,6 +79,7 @@ export type {
   WebhookSubscriptionData,
   WebhookReferralData,
   WebhookCommissionData,
+  WebhookInstallmentData,
 } from './webhook.js';
 
 // Subscriptions
@@ -96,6 +105,20 @@ export {
   parseReferralCode,
   DEFAULT_REFERRAL_CONFIG,
 } from './referral.js';
+
+// Installments
+export {
+  InstallmentManager,
+  createInstallmentManager,
+  calculateInstallmentAmounts,
+  calculateNextDueDate,
+  calculateDueDates,
+  isInstallmentOverdue,
+  isInGracePeriod,
+  getInstallmentProgress,
+  formatInstallmentSchedule,
+  DEFAULT_INSTALLMENT_CONFIG,
+} from './installment.js';
 
 // PAYLINK Token
 export {

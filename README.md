@@ -4,12 +4,12 @@ Self-hosted paid links with 402/403 protocol and blockchain payment verification
 
 **Each user runs their own server with their own RPC nodes.**
 
-## What's New in v1.6.0
+## What's New in v1.7.0
 
-- 🎁 **Referral System** - Viral growth through referral rewards
-- 💰 **Commission Tracking** - Automatic commission calculation and tracking
-- 📊 **Referral Stats** - Track conversions, earnings, and payouts
-- 🔗 **Shareable Links** - Generate unique referral URLs
+- 💳 **Installment Payments** - Split large payments into multiple installments
+- 📅 **Payment Schedules** - Configurable intervals (weekly, monthly, etc.)
+- 🔄 **Auto-Suspend** - Automatically suspend access on missed payments
+- 📊 **Progress Tracking** - Track payment completion and due dates
 
 ## Features
 
@@ -17,6 +17,7 @@ Self-hosted paid links with 402/403 protocol and blockchain payment verification
 - 🔄 **Multi-use links** - Sell access to unlimited users with one link
 - 💱 **Multi-currency support** - Accept ETH, SOL, USDC, etc. on one link
 - 🔄 **Subscription links** with recurring payments
+- 💳 **Installment payments** - Split payments into multiple installments
 - 🎁 **Referral system** - Reward users for sharing your links
 - ⛓️ Multi-chain support (EVM chains + Solana)
 - 📱 QR codes with wallet deep links (Solana Pay, EIP-681)
@@ -428,6 +429,176 @@ curl -X POST http://localhost:3000/api/commissions/com_abc123/payout \
   -d '{
     "payoutTxHash": "0x..."
   }'
+```
+
+### Installment Payments
+
+Enable installment payments to split large payments into multiple smaller ones:
+
+```bash
+# Create a link with installment option
+curl -X POST http://localhost:3000/api/links \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-secret-key" \
+  -d '{
+    "targetUrl": "https://example.com/premium-course",
+    "amount": "2",
+    "tokenSymbol": "SOL",
+    "chainId": 101,
+    "recipientAddress": "YourWalletAddress",
+    "description": "Premium Course - Pay in 4 installments",
+    "installment": {
+      "enabled": true,
+      "totalInstallments": 4,
+      "intervalDays": 30,
+      "downPaymentPercent": 25,
+      "gracePeriodDays": 3,
+      "autoSuspend": true
+    }
+  }'
+```
+
+Response:
+```json
+{
+  "success": true,
+  "link": {
+    "id": "abc123",
+    "url": "http://localhost:3000/pay/abc123",
+    "installment": {
+      "enabled": true,
+      "totalInstallments": 4,
+      "intervalDays": 30,
+      "downPaymentPercent": 25
+    }
+  }
+}
+```
+
+Create an installment plan for a buyer:
+
+```bash
+curl -X POST http://localhost:3000/api/installments \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-secret-key" \
+  -d '{
+    "payLinkId": "abc123",
+    "buyerAddress": "BuyerWalletAddress"
+  }'
+```
+
+Response:
+```json
+{
+  "id": "plan_xyz789",
+  "payLinkId": "abc123",
+  "buyerAddress": "BuyerWalletAddress",
+  "status": "pending",
+  "totalAmount": "2",
+  "totalInstallments": 4,
+  "installmentAmounts": ["0.5", "0.5", "0.5", "0.5"],
+  "intervalDays": 30,
+  "nextDueDate": "2024-12-01T00:00:00.000Z",
+  "nextInstallmentNumber": 1
+}
+```
+
+Process an installment payment:
+
+```bash
+curl -X POST http://localhost:3000/api/installments/plan_xyz789/payment \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-secret-key" \
+  -d '{
+    "txHash": "TransactionHash...",
+    "chainId": 101
+  }'
+```
+
+Response:
+```json
+{
+  "success": true,
+  "payment": {
+    "id": "ipay_abc123",
+    "installmentNumber": 1,
+    "amount": "0.5",
+    "status": "confirmed"
+  },
+  "plan": {
+    "id": "plan_xyz789",
+    "status": "active",
+    "completedInstallments": 1,
+    "paidAmount": "0.5",
+    "nextDueDate": "2025-01-01T00:00:00.000Z"
+  },
+  "progress": {
+    "paidCount": 1,
+    "remainingCount": 3,
+    "percentComplete": 25
+  }
+}
+```
+
+Get installment schedule:
+
+```bash
+curl http://localhost:3000/api/installments/plan_xyz789/schedule \
+  -H "X-API-Key: your-secret-key"
+```
+
+Response:
+```json
+{
+  "planId": "plan_xyz789",
+  "totalAmount": "2",
+  "paidAmount": "0.5",
+  "progress": {
+    "paidCount": 1,
+    "remainingCount": 3,
+    "percentComplete": 25
+  },
+  "schedule": [
+    { "number": 1, "amount": "0.5", "dueDate": "2024-12-01", "status": "paid" },
+    { "number": 2, "amount": "0.5", "dueDate": "2024-12-31", "status": "current" },
+    { "number": 3, "amount": "0.5", "dueDate": "2025-01-30", "status": "upcoming" },
+    { "number": 4, "amount": "0.5", "dueDate": "2025-03-01", "status": "upcoming" }
+  ]
+}
+```
+
+### Installment Config Options
+
+```javascript
+{
+  // Enable installment payments
+  enabled: true,
+  
+  // Number of installments (default: 4)
+  totalInstallments: 4,
+  
+  // Days between payments (default: 30)
+  intervalDays: 30,
+  
+  // First payment percentage (default: 25%)
+  downPaymentPercent: 25,
+  
+  // Grace period before suspending access (default: 3 days)
+  gracePeriodDays: 3,
+  
+  // Automatically suspend on missed payment (default: true)
+  autoSuspend: true
+}
+```
+
+### Installment Status Flow
+
+```
+pending → active → completed
+              ↓
+          suspended → active (after payment)
+              ↓
+          cancelled
 ```
 
 ### Get QR Code

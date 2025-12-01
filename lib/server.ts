@@ -16,6 +16,9 @@ import type {
   Referral,
   ReferralCommission,
   CreateReferralInput,
+  InstallmentPlan,
+  InstallmentPayment,
+  CreateInstallmentPlanInput,
 } from './types.js';
 import { ReasonCode, SOLANA_CHAIN_IDS } from './types.js';
 import { MemoryStorage } from './storage.js';
@@ -43,6 +46,12 @@ import {
   buildReferralUrl,
   parseReferralCode,
 } from './referral.js';
+import {
+  InstallmentManager,
+  calculateInstallmentAmounts,
+  getInstallmentProgress,
+  formatInstallmentSchedule,
+} from './installment.js';
 
 type Verifier = ChainVerifier | MockVerifier | SolanaVerifier | MockSolanaVerifier;
 
@@ -62,7 +71,9 @@ export class PaylinkServer {
   private webhookManager?: WebhookManager;
   private subscriptionManager: SubscriptionManager;
   private referralManager: ReferralManager;
+  private installmentManager: InstallmentManager;
   private subscriptionCheckInterval?: NodeJS.Timeout;
+  private installmentCheckInterval?: NodeJS.Timeout;
 
   constructor(config: PaylinkConfig) {
     // Default config
@@ -83,6 +94,7 @@ export class PaylinkServer {
     this.verifiers = new Map();
     this.subscriptionManager = new SubscriptionManager(this.storage);
     this.referralManager = new ReferralManager(this.storage);
+    this.installmentManager = new InstallmentManager(this.storage);
 
     // Initialize webhook manager
     if (config.webhook?.url) {
@@ -149,6 +161,7 @@ export class PaylinkServer {
     this.storage = storage;
     this.subscriptionManager = new SubscriptionManager(storage);
     this.referralManager = new ReferralManager(storage);
+    this.installmentManager = new InstallmentManager(storage);
   }
 
   /**
@@ -166,16 +179,25 @@ export class PaylinkServer {
   }
 
   /**
+   * Get installment manager
+   */
+  getInstallmentManager(): InstallmentManager {
+    return this.installmentManager;
+  }
+
+  /**
    * Start server
    */
   start(): void {
     // Start subscription payment check
     this.startSubscriptionCheck();
+    // Start installment payment check
+    this.startInstallmentCheck();
 
     this.app.listen(this.config.port, () => {
       console.log('');
       console.log('╔══════════════════════════════════════════════════════════╗');
-      console.log('║              Paylink Protocol Server v1.6.0              ║');
+      console.log('║              Paylink Protocol Server v1.7.0              ║');
       console.log('╠══════════════════════════════════════════════════════════╣');
       console.log(`║  Port:     ${String(this.config.port).padEnd(44)}║`);
       console.log(`║  Base URL: ${(this.config.baseUrl || 'http://localhost:' + this.config.port).padEnd(44)}║`);
@@ -412,6 +434,62 @@ export class PaylinkServer {
     }
   }
 
+  /**
+   * Start periodic installment check
+   */
+  private startInstallmentCheck(): void {
+    // Check every 5 minutes
+    this.installmentCheckInterval = setInterval(async () => {
+      try {
+        // Check for overdue installments
+        const overduePlans = await this.installmentManager.getOverduePlans();
+        
+        for (const plan of overduePlans) {
+          if (plan.status === 'active') {
+            const link = await this.storage.getPayLink(plan.payLinkId);
+            if (!link?.installment?.autoSuspend) continue;
+
+            // Suspend the plan
+            const suspended = await this.installmentManager.suspendPlan(plan.id, 'Payment overdue');
+            
+            if (this.webhookManager && link) {
+              this.webhookManager.sendInstallmentEvent('installment.plan_suspended', suspended, link).catch(err => {
+                console.error('Installment webhook error:', err);
+              });
+            }
+          }
+        }
+
+        // Send payment due reminders (3 days before)
+        const dueSoon = await this.installmentManager.getPlansDueSoon(3);
+        for (const plan of dueSoon) {
+          if (plan.status !== 'active') continue;
+          
+          const link = await this.storage.getPayLink(plan.payLinkId);
+          if (!link) continue;
+
+          if (this.webhookManager) {
+            this.webhookManager.sendInstallmentEvent('installment.payment_due', plan, link).catch(err => {
+              console.error('Installment webhook error:', err);
+            });
+          }
+        }
+      } catch (error) {
+        console.error('Installment check error:', error);
+      }
+    }, 300000); // 5 minutes
+  }
+
+  /**
+   * Stop installment check
+   */
+  stopInstallmentCheck(): void {
+    if (this.installmentCheckInterval) {
+      clearInterval(this.installmentCheckInterval);
+      this.installmentCheckInterval = undefined;
+    }
+  }
+
   // ========================================
   // PRIVATE METHODS
   // ========================================
@@ -447,13 +525,14 @@ export class PaylinkServer {
       const base = this.config.baseUrl || `http://localhost:${this.config.port}`;
       res.json({
         name: 'Paylink Protocol',
-        version: '1.6.0',
+        version: '1.7.0',
         chains: this.config.chains.map(c => ({ id: c.chainId, name: c.name, symbol: c.symbol })),
         endpoints: {
           paylink: `${base}${this.config.basePath}/:id`,
           status: `${base}${this.config.basePath}/:id/status`,
           confirm: `${base}${this.config.basePath}/:id/confirm`,
           subscribe: `${base}${this.config.basePath}/:id/subscribe`,
+          installment: `${base}${this.config.basePath}/:id/installment`,
         },
       });
     });
@@ -494,6 +573,17 @@ export class PaylinkServer {
       this.app.get('/api/commissions', auth, this.apiListCommissions.bind(this));
       this.app.get('/api/commissions/pending/:address', auth, this.apiGetPendingCommissions.bind(this));
       this.app.post('/api/commissions/:id/payout', auth, this.apiMarkCommissionPaid.bind(this));
+
+      // Installment admin routes
+      this.app.post('/api/installments', auth, this.apiCreateInstallmentPlan.bind(this));
+      this.app.get('/api/installments', auth, this.apiListInstallmentPlans.bind(this));
+      this.app.get('/api/installments/:id', auth, this.apiGetInstallmentPlan.bind(this));
+      this.app.get('/api/installments/:id/schedule', auth, this.apiGetInstallmentSchedule.bind(this));
+      this.app.post('/api/installments/:id/payment', auth, this.apiProcessInstallmentPayment.bind(this));
+      this.app.post('/api/installments/:id/suspend', auth, this.apiSuspendInstallmentPlan.bind(this));
+      this.app.post('/api/installments/:id/cancel', auth, this.apiCancelInstallmentPlan.bind(this));
+      this.app.get('/api/installments/buyer/:address', auth, this.apiGetBuyerInstallments.bind(this));
+      this.app.get('/api/installments/overdue', auth, this.apiGetOverdueInstallments.bind(this));
     }
   }
 
@@ -1703,6 +1793,385 @@ export class PaylinkServer {
       });
     } catch (error) {
       res.status(400).json({ error: (error as Error).message });
+    }
+  }
+
+  // ========================================
+  // INSTALLMENT API HANDLERS
+  // ========================================
+
+  private async apiCreateInstallmentPlan(req: Request, res: Response): Promise<void> {
+    try {
+      const { payLinkId, buyerAddress, metadata } = req.body;
+
+      if (!payLinkId || !buyerAddress) {
+        res.status(400).json({ error: 'Missing required fields: payLinkId, buyerAddress' });
+        return;
+      }
+
+      const plan = await this.installmentManager.createPlan({
+        payLinkId,
+        buyerAddress,
+        metadata,
+      });
+
+      const link = await this.storage.getPayLink(payLinkId);
+
+      // Send webhook
+      if (this.webhookManager && link) {
+        this.webhookManager.sendInstallmentEvent('installment.plan_created', plan, link).catch(err => {
+          console.error('Installment webhook error:', err);
+        });
+      }
+
+      res.status(201).json({
+        id: plan.id,
+        payLinkId: plan.payLinkId,
+        buyerAddress: plan.buyerAddress,
+        status: plan.status,
+        totalAmount: plan.totalAmount,
+        totalInstallments: plan.totalInstallments,
+        installmentAmounts: plan.installmentAmounts,
+        intervalDays: plan.intervalDays,
+        nextDueDate: plan.nextDueDate.toISOString(),
+        nextInstallmentNumber: plan.nextInstallmentNumber,
+        createdAt: plan.createdAt.toISOString(),
+      });
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+    }
+  }
+
+  private async apiListInstallmentPlans(req: Request, res: Response): Promise<void> {
+    try {
+      const { payLinkId, buyerAddress, status } = req.query;
+
+      let plans: InstallmentPlan[];
+
+      if (payLinkId) {
+        plans = await this.storage.getInstallmentPlansByPayLink(payLinkId as string);
+      } else if (buyerAddress) {
+        plans = await this.storage.getInstallmentPlansByBuyer(buyerAddress as string);
+      } else {
+        plans = await this.storage.getAllInstallmentPlans();
+      }
+
+      // Filter by status if provided
+      if (status) {
+        plans = plans.filter(p => p.status === status);
+      }
+
+      res.json({
+        count: plans.length,
+        plans: plans.map(p => ({
+          id: p.id,
+          payLinkId: p.payLinkId,
+          buyerAddress: p.buyerAddress,
+          status: p.status,
+          totalAmount: p.totalAmount,
+          paidAmount: p.paidAmount,
+          totalInstallments: p.totalInstallments,
+          completedInstallments: p.completedInstallments,
+          nextDueDate: p.nextDueDate.toISOString(),
+          nextInstallmentNumber: p.nextInstallmentNumber,
+          createdAt: p.createdAt.toISOString(),
+          progress: getInstallmentProgress(p),
+        })),
+      });
+    } catch (error) {
+      console.error('List installment plans error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+
+  private async apiGetInstallmentPlan(req: Request, res: Response): Promise<void> {
+    try {
+      const details = await this.installmentManager.getPlanDetails(req.params.id);
+
+      if (!details) {
+        res.status(404).json({ error: 'Installment plan not found' });
+        return;
+      }
+
+      const { plan, payments, schedule, progress } = details;
+
+      res.json({
+        id: plan.id,
+        payLinkId: plan.payLinkId,
+        buyerAddress: plan.buyerAddress,
+        status: plan.status,
+        totalAmount: plan.totalAmount,
+        paidAmount: plan.paidAmount,
+        totalInstallments: plan.totalInstallments,
+        completedInstallments: plan.completedInstallments,
+        installmentAmounts: plan.installmentAmounts,
+        intervalDays: plan.intervalDays,
+        gracePeriodDays: plan.gracePeriodDays,
+        nextDueDate: plan.nextDueDate.toISOString(),
+        nextInstallmentNumber: plan.nextInstallmentNumber,
+        createdAt: plan.createdAt.toISOString(),
+        updatedAt: plan.updatedAt.toISOString(),
+        activatedAt: plan.activatedAt?.toISOString(),
+        completedAt: plan.completedAt?.toISOString(),
+        suspendedAt: plan.suspendedAt?.toISOString(),
+        cancelledAt: plan.cancelledAt?.toISOString(),
+        progress,
+        schedule,
+        payments: payments.map(p => ({
+          id: p.id,
+          installmentNumber: p.installmentNumber,
+          amount: p.amount,
+          expectedAmount: p.expectedAmount,
+          txHash: p.txHash,
+          status: p.status,
+          dueDate: p.dueDate.toISOString(),
+          createdAt: p.createdAt.toISOString(),
+          confirmedAt: p.confirmedAt?.toISOString(),
+        })),
+      });
+    } catch (error) {
+      console.error('Get installment plan error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+
+  private async apiGetInstallmentSchedule(req: Request, res: Response): Promise<void> {
+    try {
+      const details = await this.installmentManager.getPlanDetails(req.params.id);
+
+      if (!details) {
+        res.status(404).json({ error: 'Installment plan not found' });
+        return;
+      }
+
+      res.json({
+        planId: details.plan.id,
+        totalAmount: details.plan.totalAmount,
+        paidAmount: details.plan.paidAmount,
+        progress: details.progress,
+        schedule: details.schedule,
+      });
+    } catch (error) {
+      console.error('Get installment schedule error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+
+  private async apiProcessInstallmentPayment(req: Request, res: Response): Promise<void> {
+    try {
+      const { txHash, chainId } = req.body;
+
+      if (!txHash || !chainId) {
+        res.status(400).json({ error: 'Missing required fields: txHash, chainId' });
+        return;
+      }
+
+      const plan = await this.storage.getInstallmentPlan(req.params.id);
+      if (!plan) {
+        res.status(404).json({ error: 'Installment plan not found' });
+        return;
+      }
+
+      const link = await this.storage.getPayLink(plan.payLinkId);
+      if (!link) {
+        res.status(404).json({ error: 'PayLink not found' });
+        return;
+      }
+
+      // Get verifier
+      const verifier = this.verifiers.get(chainId);
+      if (!verifier) {
+        res.status(400).json({ error: 'Unsupported chain' });
+        return;
+      }
+
+      // Verify payment
+      const expectedAmount = plan.installmentAmounts[plan.nextInstallmentNumber - 1];
+      const result = await verifier.verifyPayment({
+        txHash,
+        recipient: link.recipientAddress,
+        amount: expectedAmount,
+      });
+
+      if (result.status !== 'confirmed') {
+        res.status(400).json({ error: 'Payment not confirmed', status: result.status });
+        return;
+      }
+
+      // Create payment record
+      const payment: Payment = {
+        id: generateUUID(),
+        payLinkId: plan.payLinkId,
+        chainId,
+        txHash,
+        fromAddress: result.fromAddress || plan.buyerAddress,
+        amount: result.actualAmount || expectedAmount,
+        tokenSymbol: link.price.tokenSymbol,
+        confirmed: true,
+        createdAt: new Date(),
+        confirmedAt: new Date(),
+      };
+      await this.storage.savePayment(payment);
+
+      // Process installment payment
+      const installmentPayment = await this.installmentManager.processPayment(plan.id, payment);
+
+      // Send webhook for payment received
+      if (this.webhookManager && link) {
+        this.webhookManager.sendInstallmentEvent('installment.payment_received', plan, link, installmentPayment).catch(err => {
+          console.error('Installment webhook error:', err);
+        });
+      }
+
+      // Confirm the installment payment
+      const { payment: confirmedPayment, plan: updatedPlan } = await this.installmentManager.confirmPayment(installmentPayment.id);
+
+      // Send appropriate webhook
+      if (this.webhookManager && link) {
+        if (updatedPlan.status === 'active' && updatedPlan.completedInstallments === 1) {
+          this.webhookManager.sendInstallmentEvent('installment.plan_activated', updatedPlan, link, confirmedPayment).catch(err => {
+            console.error('Installment webhook error:', err);
+          });
+        }
+
+        if (updatedPlan.status === 'completed') {
+          this.webhookManager.sendInstallmentEvent('installment.plan_completed', updatedPlan, link, confirmedPayment).catch(err => {
+            console.error('Installment webhook error:', err);
+          });
+        }
+
+        this.webhookManager.sendInstallmentEvent('installment.payment_confirmed', updatedPlan, link, confirmedPayment).catch(err => {
+          console.error('Installment webhook error:', err);
+        });
+      }
+
+      const progress = getInstallmentProgress(updatedPlan);
+
+      res.json({
+        success: true,
+        payment: {
+          id: confirmedPayment.id,
+          installmentNumber: confirmedPayment.installmentNumber,
+          amount: confirmedPayment.amount,
+          status: confirmedPayment.status,
+          confirmedAt: confirmedPayment.confirmedAt?.toISOString(),
+        },
+        plan: {
+          id: updatedPlan.id,
+          status: updatedPlan.status,
+          completedInstallments: updatedPlan.completedInstallments,
+          paidAmount: updatedPlan.paidAmount,
+          nextDueDate: updatedPlan.nextDueDate?.toISOString(),
+          nextInstallmentNumber: updatedPlan.nextInstallmentNumber,
+        },
+        progress,
+      });
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+    }
+  }
+
+  private async apiSuspendInstallmentPlan(req: Request, res: Response): Promise<void> {
+    try {
+      const { reason } = req.body;
+
+      const plan = await this.installmentManager.suspendPlan(req.params.id, reason);
+      const link = await this.storage.getPayLink(plan.payLinkId);
+
+      // Send webhook
+      if (this.webhookManager && link) {
+        this.webhookManager.sendInstallmentEvent('installment.plan_suspended', plan, link).catch(err => {
+          console.error('Installment webhook error:', err);
+        });
+      }
+
+      res.json({
+        success: true,
+        plan: {
+          id: plan.id,
+          status: plan.status,
+          suspendedAt: plan.suspendedAt?.toISOString(),
+        },
+      });
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+    }
+  }
+
+  private async apiCancelInstallmentPlan(req: Request, res: Response): Promise<void> {
+    try {
+      const { reason } = req.body;
+
+      const plan = await this.installmentManager.cancelPlan(req.params.id, reason);
+      const link = await this.storage.getPayLink(plan.payLinkId);
+
+      // Send webhook
+      if (this.webhookManager && link) {
+        this.webhookManager.sendInstallmentEvent('installment.plan_cancelled', plan, link).catch(err => {
+          console.error('Installment webhook error:', err);
+        });
+      }
+
+      res.json({
+        success: true,
+        plan: {
+          id: plan.id,
+          status: plan.status,
+          cancelledAt: plan.cancelledAt?.toISOString(),
+        },
+      });
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+    }
+  }
+
+  private async apiGetBuyerInstallments(req: Request, res: Response): Promise<void> {
+    try {
+      const plans = await this.storage.getInstallmentPlansByBuyer(req.params.address);
+
+      res.json({
+        address: req.params.address,
+        count: plans.length,
+        plans: plans.map(p => ({
+          id: p.id,
+          payLinkId: p.payLinkId,
+          status: p.status,
+          totalAmount: p.totalAmount,
+          paidAmount: p.paidAmount,
+          totalInstallments: p.totalInstallments,
+          completedInstallments: p.completedInstallments,
+          nextDueDate: p.nextDueDate.toISOString(),
+          progress: getInstallmentProgress(p),
+        })),
+      });
+    } catch (error) {
+      console.error('Get buyer installments error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+
+  private async apiGetOverdueInstallments(req: Request, res: Response): Promise<void> {
+    try {
+      const plans = await this.installmentManager.getOverduePlans();
+
+      res.json({
+        count: plans.length,
+        plans: plans.map(p => ({
+          id: p.id,
+          payLinkId: p.payLinkId,
+          buyerAddress: p.buyerAddress,
+          status: p.status,
+          totalAmount: p.totalAmount,
+          paidAmount: p.paidAmount,
+          completedInstallments: p.completedInstallments,
+          nextDueDate: p.nextDueDate.toISOString(),
+          nextInstallmentNumber: p.nextInstallmentNumber,
+          progress: getInstallmentProgress(p),
+        })),
+      });
+    } catch (error) {
+      console.error('Get overdue installments error:', error);
+      res.status(500).json({ error: 'Internal server error' });
     }
   }
 

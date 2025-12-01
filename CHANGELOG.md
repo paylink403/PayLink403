@@ -2,6 +2,94 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.6.0] - 2024-12-01
+
+### Added
+
+- **Referral System**: Viral growth through referral rewards
+  - Create referral codes for any payment link
+  - Track referrals and commissions automatically
+  - Configurable commission percentages (default: 10%)
+  - Commission tracking with pending/confirmed/paid statuses
+  - Self-referral prevention
+
+- **New Types**:
+  - `Referral` - Referral entity with tracking stats
+  - `ReferralCommission` - Individual commission records
+  - `ReferralConfig` - Configuration for referral programs
+  - `ReferralStats` - Statistics for referrers
+  - `ReferralStatus` - Commission status type
+
+- **ReferralManager**:
+  - `createReferral()` - Create new referral codes
+  - `processReferralPayment()` - Process commission on payment
+  - `confirmCommission()` - Confirm pending commission
+  - `markCommissionPaid()` - Mark commission as paid out
+  - `getStats()` - Get referrer statistics
+  - `disableReferral()` - Disable a referral
+
+- **Webhook Events**:
+  - `referral.created` - New referral created
+  - `referral.disabled` - Referral disabled
+  - `commission.pending` - Commission pending
+  - `commission.confirmed` - Commission confirmed
+  - `commission.paid` - Commission paid out
+
+- **Utility Functions**:
+  - `generateReferralCode()` - Generate unique codes
+  - `isValidReferralCode()` - Validate code format
+  - `calculateCommission()` - Calculate commission amount
+  - `buildReferralUrl()` - Build shareable referral URL
+  - `parseReferralCode()` - Extract code from URL
+
+### API Changes
+
+- `POST /api/links` now accepts `referral` configuration:
+  ```json
+  {
+    "referral": {
+      "enabled": true,
+      "commissionPercent": 10,
+      "minPayoutThreshold": "0.01",
+      "expirationDays": 30
+    }
+  }
+  ```
+
+- `POST /pay/:id/confirm` now accepts `referralCode`:
+  ```json
+  {
+    "txHash": "0x...",
+    "referralCode": "ABC123"
+  }
+  ```
+
+### New Admin Endpoints
+
+| Method | URL | Description |
+|--------|-----|-------------|
+| POST | `/api/referrals` | Create referral |
+| GET | `/api/referrals` | List referrals |
+| GET | `/api/referrals/:id` | Get referral |
+| GET | `/api/referrals/code/:code` | Get by code |
+| POST | `/api/referrals/:id/disable` | Disable referral |
+| GET | `/api/referrals/:id/stats` | Get stats |
+| GET | `/api/commissions` | List commissions |
+| GET | `/api/commissions/pending/:address` | Pending payouts |
+| POST | `/api/commissions/:id/payout` | Mark as paid |
+
+### Storage Interface Changes
+
+- Added referral methods:
+  - `saveReferral()`, `getReferral()`, `getReferralByCode()`
+  - `updateReferral()`, `getReferralsByPayLink()`
+  - `getReferralsByReferrer()`, `getAllReferrals()`
+
+- Added commission methods:
+  - `saveCommission()`, `getCommission()`, `updateCommission()`
+  - `getCommissionsByReferral()`, `getCommissionsByReferrer()`
+  - `getPendingCommissions()`, `getAllCommissions()`
+
 ## [1.5.0] - 2024-12-01
 
 ### Added

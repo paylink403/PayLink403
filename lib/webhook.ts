@@ -1,5 +1,5 @@
 import { createHmac } from 'crypto';
-import type { PayLink, Payment, Subscription } from './types.js';
+import type { PayLink, Payment, Subscription, Referral, ReferralCommission } from './types.js';
 
 /**
  * Webhook configuration
@@ -38,7 +38,12 @@ export type WebhookEvent =
   | 'subscription.past_due'
   | 'subscription.expired'
   | 'subscription.trial_ending'
-  | 'subscription.payment_due';
+  | 'subscription.payment_due'
+  | 'referral.created'
+  | 'referral.disabled'
+  | 'commission.pending'
+  | 'commission.confirmed'
+  | 'commission.paid';
 
 /**
  * Webhook payload base
@@ -51,7 +56,7 @@ export interface WebhookPayload {
   /** Unique event ID */
   eventId: string;
   /** Event data */
-  data: WebhookPaymentData | WebhookLinkData | WebhookSubscriptionData;
+  data: WebhookPaymentData | WebhookLinkData | WebhookSubscriptionData | WebhookReferralData | WebhookCommissionData;
 }
 
 /**
@@ -140,6 +145,74 @@ export interface WebhookSubscriptionData {
 }
 
 /**
+ * Referral event data
+ */
+export interface WebhookReferralData {
+  type: 'referral';
+  referral: {
+    id: string;
+    code: string;
+    referrerAddress: string;
+    payLinkId: string;
+    totalReferrals: number;
+    confirmedReferrals: number;
+    totalEarned: string;
+    pendingAmount: string;
+    status: string;
+    createdAt: string;
+  };
+  payLink: {
+    id: string;
+    targetUrl: string;
+    price: {
+      amount: string;
+      tokenSymbol: string;
+      chainId: number;
+    };
+    recipientAddress: string;
+  };
+}
+
+/**
+ * Commission event data
+ */
+export interface WebhookCommissionData {
+  type: 'commission';
+  commission: {
+    id: string;
+    referralId: string;
+    paymentId: string;
+    referrerAddress: string;
+    referredAddress: string;
+    paymentAmount: string;
+    commissionAmount: string;
+    commissionPercent: number;
+    tokenSymbol: string;
+    chainId: number;
+    status: string;
+    createdAt: string;
+    confirmedAt?: string;
+    paidAt?: string;
+    payoutTxHash?: string;
+  };
+  referral: {
+    id: string;
+    code: string;
+    referrerAddress: string;
+  };
+  payLink: {
+    id: string;
+    targetUrl: string;
+    price: {
+      amount: string;
+      tokenSymbol: string;
+      chainId: number;
+    };
+    recipientAddress: string;
+  };
+}
+
+/**
  * Webhook delivery result
  */
 export interface WebhookResult {
@@ -182,6 +255,11 @@ export class WebhookManager {
         'subscription.expired',
         'subscription.trial_ending',
         'subscription.payment_due',
+        'referral.created',
+        'referral.disabled',
+        'commission.pending',
+        'commission.confirmed',
+        'commission.paid',
       ],
       timeout: config.timeout ?? 10000,
       retries: config.retries ?? 3,
@@ -312,6 +390,101 @@ export class WebhookManager {
             interval: payLink.subscription.interval,
             intervalCount: payLink.subscription.intervalCount,
           } : undefined,
+        },
+      },
+    };
+
+    return this.send(payload);
+  }
+
+  /**
+   * Send referral event
+   */
+  async sendReferralEvent(
+    event: WebhookEvent,
+    referral: Referral,
+    payLink: PayLink
+  ): Promise<WebhookResult | null> {
+    if (!this.isEventEnabled(event)) {
+      return null;
+    }
+
+    const payload: WebhookPayload = {
+      event,
+      timestamp: new Date().toISOString(),
+      eventId: this.generateEventId(),
+      data: {
+        type: 'referral',
+        referral: {
+          id: referral.id,
+          code: referral.code,
+          referrerAddress: referral.referrerAddress,
+          payLinkId: referral.payLinkId,
+          totalReferrals: referral.totalReferrals,
+          confirmedReferrals: referral.confirmedReferrals,
+          totalEarned: referral.totalEarned,
+          pendingAmount: referral.pendingAmount,
+          status: referral.status,
+          createdAt: referral.createdAt.toISOString(),
+        },
+        payLink: {
+          id: payLink.id,
+          targetUrl: payLink.targetUrl,
+          price: payLink.price,
+          recipientAddress: payLink.recipientAddress,
+        },
+      },
+    };
+
+    return this.send(payload);
+  }
+
+  /**
+   * Send commission event
+   */
+  async sendCommissionEvent(
+    event: WebhookEvent,
+    commission: ReferralCommission,
+    referral: Referral,
+    payLink: PayLink
+  ): Promise<WebhookResult | null> {
+    if (!this.isEventEnabled(event)) {
+      return null;
+    }
+
+    const payload: WebhookPayload = {
+      event,
+      timestamp: new Date().toISOString(),
+      eventId: this.generateEventId(),
+      data: {
+        type: 'commission',
+        commission: {
+          id: commission.id,
+          referralId: commission.referralId,
+          paymentId: commission.paymentId,
+          referrerAddress: commission.referrerAddress,
+          referredAddress: commission.referredAddress,
+          paymentAmount: commission.paymentAmount,
+          commissionAmount: commission.commissionAmount,
+          commissionPercent: commission.commissionPercent,
+          tokenSymbol: commission.tokenSymbol,
+          chainId: commission.chainId,
+          status: commission.status,
+          createdAt: commission.createdAt.toISOString(),
+          confirmedAt: commission.confirmedAt?.toISOString(),
+          paidAt: commission.paidAt?.toISOString(),
+          payoutTxHash: commission.payoutTxHash,
+        },
+        referral: {
+          id: referral.id,
+          code: referral.code,
+          referrerAddress: referral.referrerAddress,
+        },
+        payLink: {
+          id: payLink.id,
+          targetUrl: payLink.targetUrl,
+          price: payLink.price,
+          recipientAddress: payLink.recipientAddress,
         },
       },
     };

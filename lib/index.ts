@@ -25,6 +25,13 @@ export type {
   SubscriptionInterval,
   SubscriptionStatus,
   CreateSubscriptionInput,
+  // Referral types
+  Referral,
+  ReferralCommission,
+  ReferralConfig,
+  ReferralStats,
+  ReferralStatus,
+  CreateReferralInput,
 } from './types.js';
 
 export { ReasonCode, SOLANA_CHAIN_IDS } from './types.js';
@@ -62,6 +69,8 @@ export type {
   WebhookPaymentData,
   WebhookLinkData,
   WebhookSubscriptionData,
+  WebhookReferralData,
+  WebhookCommissionData,
 } from './webhook.js';
 
 // Subscriptions
@@ -74,6 +83,19 @@ export {
   isWithinGracePeriod,
   getIntervalDisplayName,
 } from './subscription.js';
+
+// Referrals
+export {
+  ReferralManager,
+  createReferralManager,
+  generateReferralCode,
+  isValidReferralCode,
+  calculateCommission,
+  isCommissionExpired,
+  buildReferralUrl,
+  parseReferralCode,
+  DEFAULT_REFERRAL_CONFIG,
+} from './referral.js';
 
 // PAYLINK Token
 export {

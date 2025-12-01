@@ -4,6 +4,11 @@
 export type PayLinkStatus = 'active' | 'disabled' | 'expired';
 
 /**
+ * Referral status
+ */
+export type ReferralStatus = 'pending' | 'confirmed' | 'paid' | 'expired';
+
+/**
  * Payment verification status
  */
 export type PaymentStatus = 'not_found' | 'pending' | 'confirmed' | 'failed' | 'underpaid';
@@ -108,6 +113,8 @@ export interface PayLink {
    * When true, link doesn't expire after first payment
    */
   multiUse?: boolean;
+  /** Referral program configuration */
+  referral?: ReferralConfig;
 }
 
 /**
@@ -163,6 +170,126 @@ export interface Payment {
   confirmed: boolean;
   createdAt: Date;
   confirmedAt?: Date;
+  /** Referral code used for this payment */
+  referralCode?: string;
+}
+
+/**
+ * Referral configuration for a payment link
+ */
+export interface ReferralConfig {
+  /** Enable referral program for this link */
+  enabled: boolean;
+  /** Commission percentage for referrer (0-100, default: 10) */
+  commissionPercent: number;
+  /** Minimum payout threshold (optional) */
+  minPayoutThreshold?: string;
+  /** Commission expires after N days (optional) */
+  expirationDays?: number;
+}
+
+/**
+ * Referral entity
+ */
+export interface Referral {
+  /** Unique referral ID */
+  id: string;
+  /** Referral code (short, shareable) */
+  code: string;
+  /** Referrer wallet address (who earns commission) */
+  referrerAddress: string;
+  /** Associated PayLink ID */
+  payLinkId: string;
+  /** Total referrals count */
+  totalReferrals: number;
+  /** Confirmed referrals count */
+  confirmedReferrals: number;
+  /** Total commission earned (in primary token) */
+  totalEarned: string;
+  /** Pending commission (not yet paid out) */
+  pendingAmount: string;
+  /** Paid out commission */
+  paidAmount: string;
+  /** Status */
+  status: 'active' | 'disabled';
+  /** Created timestamp */
+  createdAt: Date;
+  /** Updated timestamp */
+  updatedAt: Date;
+  /** Custom metadata */
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Referral commission record (individual commission per payment)
+ */
+export interface ReferralCommission {
+  /** Unique commission ID */
+  id: string;
+  /** Referral ID */
+  referralId: string;
+  /** Payment ID that triggered this commission */
+  paymentId: string;
+  /** PayLink ID */
+  payLinkId: string;
+  /** Referrer address */
+  referrerAddress: string;
+  /** Referred user address */
+  referredAddress: string;
+  /** Payment amount */
+  paymentAmount: string;
+  /** Commission amount */
+  commissionAmount: string;
+  /** Commission percentage at time of payment */
+  commissionPercent: number;
+  /** Token symbol */
+  tokenSymbol: string;
+  /** Chain ID */
+  chainId: number;
+  /** Status */
+  status: ReferralStatus;
+  /** Created timestamp */
+  createdAt: Date;
+  /** Confirmed timestamp */
+  confirmedAt?: Date;
+  /** Paid out timestamp */
+  paidAt?: Date;
+  /** Payout transaction hash */
+  payoutTxHash?: string;
+}
+
+/**
+ * Input for creating a referral
+ */
+export interface CreateReferralInput {
+  /** PayLink ID */
+  payLinkId: string;
+  /** Referrer wallet address */
+  referrerAddress: string;
+  /** Custom referral code (optional, auto-generated if not provided) */
+  code?: string;
+  /** Custom metadata */
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Referral statistics
+ */
+export interface ReferralStats {
+  /** Total referrals */
+  totalReferrals: number;
+  /** Confirmed referrals */
+  confirmedReferrals: number;
+  /** Pending referrals */
+  pendingReferrals: number;
+  /** Total earned */
+  totalEarned: string;
+  /** Pending payout */
+  pendingPayout: string;
+  /** Paid out */
+  paidOut: string;
+  /** Conversion rate (confirmed / total) */
+  conversionRate: number;
 }
 
 /**
@@ -188,6 +315,8 @@ export interface CreatePayLinkInput {
    * Each payer gets their own access after payment
    */
   multiUse?: boolean;
+  /** Referral program configuration */
+  referral?: ReferralConfig;
 }
 
 /**
@@ -387,4 +516,22 @@ export interface Storage {
   getSubscriptionsByPayLink(payLinkId: string): Promise<Subscription[]>;
   getSubscriptionsDue(beforeDate: Date): Promise<Subscription[]>;
   getAllSubscriptions(): Promise<Subscription[]>;
+
+  // Referral methods
+  saveReferral(referral: Referral): Promise<void>;
+  getReferral(id: string): Promise<Referral | null>;
+  getReferralByCode(code: string): Promise<Referral | null>;
+  updateReferral(referral: Referral): Promise<void>;
+  getReferralsByPayLink(payLinkId: string): Promise<Referral[]>;
+  getReferralsByReferrer(referrerAddress: string): Promise<Referral[]>;
+  getAllReferrals(): Promise<Referral[]>;
+
+  // Referral commission methods
+  saveCommission(commission: ReferralCommission): Promise<void>;
+  getCommission(id: string): Promise<ReferralCommission | null>;
+  updateCommission(commission: ReferralCommission): Promise<void>;
+  getCommissionsByReferral(referralId: string): Promise<ReferralCommission[]>;
+  getCommissionsByReferrer(referrerAddress: string): Promise<ReferralCommission[]>;
+  getPendingCommissions(referrerAddress: string): Promise<ReferralCommission[]>;
+  getAllCommissions(): Promise<ReferralCommission[]>;
 }

@@ -1,4 +1,4 @@
-import type { Storage, PayLink, Payment, Subscription } from './types.js';
+import type { Storage, PayLink, Payment, Subscription, Referral, ReferralCommission } from './types.js';
 
 /**
  * In-memory storage implementation
@@ -13,6 +13,13 @@ export class MemoryStorage implements Storage {
   private subscriptions = new Map<string, Subscription>();
   private subscriptionsByAddress = new Map<string, Subscription>();
   private subscriptionsByLink = new Map<string, Subscription[]>();
+  private referrals = new Map<string, Referral>();
+  private referralsByCode = new Map<string, Referral>();
+  private referralsByLink = new Map<string, Referral[]>();
+  private referralsByReferrer = new Map<string, Referral[]>();
+  private commissions = new Map<string, ReferralCommission>();
+  private commissionsByReferral = new Map<string, ReferralCommission[]>();
+  private commissionsByReferrer = new Map<string, ReferralCommission[]>();
 
   async getPayLink(id: string): Promise<PayLink | null> {
     return this.links.get(id) ?? null;
@@ -150,6 +157,130 @@ export class MemoryStorage implements Storage {
     return Array.from(this.subscriptions.values());
   }
 
+  // Referral methods
+
+  async saveReferral(referral: Referral): Promise<void> {
+    this.referrals.set(referral.id, { ...referral });
+    this.referralsByCode.set(referral.code.toUpperCase(), referral);
+
+    // Index by link
+    const linkRefs = this.referralsByLink.get(referral.payLinkId) ?? [];
+    linkRefs.push(referral);
+    this.referralsByLink.set(referral.payLinkId, linkRefs);
+
+    // Index by referrer
+    const referrerKey = referral.referrerAddress.toLowerCase();
+    const referrerRefs = this.referralsByReferrer.get(referrerKey) ?? [];
+    referrerRefs.push(referral);
+    this.referralsByReferrer.set(referrerKey, referrerRefs);
+  }
+
+  async getReferral(id: string): Promise<Referral | null> {
+    return this.referrals.get(id) ?? null;
+  }
+
+  async getReferralByCode(code: string): Promise<Referral | null> {
+    return this.referralsByCode.get(code.toUpperCase()) ?? null;
+  }
+
+  async updateReferral(referral: Referral): Promise<void> {
+    if (!this.referrals.has(referral.id)) {
+      throw new Error(`Referral ${referral.id} not found`);
+    }
+
+    const updated = { ...referral, updatedAt: new Date() };
+    this.referrals.set(referral.id, updated);
+    this.referralsByCode.set(referral.code.toUpperCase(), updated);
+
+    // Update link index
+    const linkRefs = this.referralsByLink.get(referral.payLinkId) ?? [];
+    const linkIdx = linkRefs.findIndex(r => r.id === referral.id);
+    if (linkIdx !== -1) {
+      linkRefs[linkIdx] = updated;
+    }
+
+    // Update referrer index
+    const referrerKey = referral.referrerAddress.toLowerCase();
+    const referrerRefs = this.referralsByReferrer.get(referrerKey) ?? [];
+    const referrerIdx = referrerRefs.findIndex(r => r.id === referral.id);
+    if (referrerIdx !== -1) {
+      referrerRefs[referrerIdx] = updated;
+    }
+  }
+
+  async getReferralsByPayLink(payLinkId: string): Promise<Referral[]> {
+    return this.referralsByLink.get(payLinkId) ?? [];
+  }
+
+  async getReferralsByReferrer(referrerAddress: string): Promise<Referral[]> {
+    return this.referralsByReferrer.get(referrerAddress.toLowerCase()) ?? [];
+  }
+
+  async getAllReferrals(): Promise<Referral[]> {
+    return Array.from(this.referrals.values());
+  }
+
+  // Referral commission methods
+
+  async saveCommission(commission: ReferralCommission): Promise<void> {
+    this.commissions.set(commission.id, { ...commission });
+
+    // Index by referral
+    const refComms = this.commissionsByReferral.get(commission.referralId) ?? [];
+    refComms.push(commission);
+    this.commissionsByReferral.set(commission.referralId, refComms);
+
+    // Index by referrer
+    const referrerKey = commission.referrerAddress.toLowerCase();
+    const referrerComms = this.commissionsByReferrer.get(referrerKey) ?? [];
+    referrerComms.push(commission);
+    this.commissionsByReferrer.set(referrerKey, referrerComms);
+  }
+
+  async getCommission(id: string): Promise<ReferralCommission | null> {
+    return this.commissions.get(id) ?? null;
+  }
+
+  async updateCommission(commission: ReferralCommission): Promise<void> {
+    if (!this.commissions.has(commission.id)) {
+      throw new Error(`Commission ${commission.id} not found`);
+    }
+
+    this.commissions.set(commission.id, { ...commission });
+
+    // Update referral index
+    const refComms = this.commissionsByReferral.get(commission.referralId) ?? [];
+    const refIdx = refComms.findIndex(c => c.id === commission.id);
+    if (refIdx !== -1) {
+      refComms[refIdx] = commission;
+    }
+
+    // Update referrer index
+    const referrerKey = commission.referrerAddress.toLowerCase();
+    const referrerComms = this.commissionsByReferrer.get(referrerKey) ?? [];
+    const referrerIdx = referrerComms.findIndex(c => c.id === commission.id);
+    if (referrerIdx !== -1) {
+      referrerComms[referrerIdx] = commission;
+    }
+  }
+
+  async getCommissionsByReferral(referralId: string): Promise<ReferralCommission[]> {
+    return this.commissionsByReferral.get(referralId) ?? [];
+  }
+
+  async getCommissionsByReferrer(referrerAddress: string): Promise<ReferralCommission[]> {
+    return this.commissionsByReferrer.get(referrerAddress.toLowerCase()) ?? [];
+  }
+
+  async getPendingCommissions(referrerAddress: string): Promise<ReferralCommission[]> {
+    const comms = await this.getCommissionsByReferrer(referrerAddress);
+    return comms.filter(c => c.status === 'confirmed');
+  }
+
+  async getAllCommissions(): Promise<ReferralCommission[]> {
+    return Array.from(this.commissions.values());
+  }
+
   /** Clear all data */
   clear(): void {
     this.links.clear();
@@ -160,5 +291,12 @@ export class MemoryStorage implements Storage {
     this.subscriptions.clear();
     this.subscriptionsByAddress.clear();
     this.subscriptionsByLink.clear();
+    this.referrals.clear();
+    this.referralsByCode.clear();
+    this.referralsByLink.clear();
+    this.referralsByReferrer.clear();
+    this.commissions.clear();
+    this.commissionsByReferral.clear();
+    this.commissionsByReferrer.clear();
   }
 }

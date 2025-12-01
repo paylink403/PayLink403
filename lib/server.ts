@@ -13,6 +13,9 @@ import type {
   Subscription,
   CreateSubscriptionInput,
   PaymentOption,
+  Referral,
+  ReferralCommission,
+  CreateReferralInput,
 } from './types.js';
 import { ReasonCode, SOLANA_CHAIN_IDS } from './types.js';
 import { MemoryStorage } from './storage.js';
@@ -35,6 +38,11 @@ import {
   isInTrialPeriod,
   getIntervalDisplayName,
 } from './subscription.js';
+import {
+  ReferralManager,
+  buildReferralUrl,
+  parseReferralCode,
+} from './referral.js';
 
 type Verifier = ChainVerifier | MockVerifier | SolanaVerifier | MockSolanaVerifier;
 
@@ -53,6 +61,7 @@ export class PaylinkServer {
   private verifiers: Map<number, Verifier>;
   private webhookManager?: WebhookManager;
   private subscriptionManager: SubscriptionManager;
+  private referralManager: ReferralManager;
   private subscriptionCheckInterval?: NodeJS.Timeout;
 
   constructor(config: PaylinkConfig) {
@@ -73,6 +82,7 @@ export class PaylinkServer {
     this.storage = new MemoryStorage();
     this.verifiers = new Map();
     this.subscriptionManager = new SubscriptionManager(this.storage);
+    this.referralManager = new ReferralManager(this.storage);
 
     // Initialize webhook manager
     if (config.webhook?.url) {
@@ -138,6 +148,7 @@ export class PaylinkServer {
   setStorage(storage: Storage): void {
     this.storage = storage;
     this.subscriptionManager = new SubscriptionManager(storage);
+    this.referralManager = new ReferralManager(storage);
   }
 
   /**
@@ -145,6 +156,13 @@ export class PaylinkServer {
    */
   getSubscriptionManager(): SubscriptionManager {
     return this.subscriptionManager;
+  }
+
+  /**
+   * Get referral manager
+   */
+  getReferralManager(): ReferralManager {
+    return this.referralManager;
   }
 
   /**
@@ -157,7 +175,7 @@ export class PaylinkServer {
     this.app.listen(this.config.port, () => {
       console.log('');
       console.log('╔══════════════════════════════════════════════════════════╗');
-      console.log('║              Paylink Protocol Server v1.5.0              ║');
+      console.log('║              Paylink Protocol Server v1.6.0              ║');
       console.log('╠══════════════════════════════════════════════════════════╣');
       console.log(`║  Port:     ${String(this.config.port).padEnd(44)}║`);
       console.log(`║  Base URL: ${(this.config.baseUrl || 'http://localhost:' + this.config.port).padEnd(44)}║`);
@@ -211,6 +229,7 @@ export class PaylinkServer {
       metadata: input.metadata,
       subscription: input.subscription,
       multiUse: input.multiUse,
+      referral: input.referral,
     };
 
     await this.storage.savePayLink(payLink);
@@ -428,7 +447,7 @@ export class PaylinkServer {
       const base = this.config.baseUrl || `http://localhost:${this.config.port}`;
       res.json({
         name: 'Paylink Protocol',
-        version: '1.3.0',
+        version: '1.6.0',
         chains: this.config.chains.map(c => ({ id: c.chainId, name: c.name, symbol: c.symbol })),
         endpoints: {
           paylink: `${base}${this.config.basePath}/:id`,
@@ -464,6 +483,17 @@ export class PaylinkServer {
       this.app.post('/api/subscriptions/:id/cancel', auth, this.apiCancelSubscription.bind(this));
       this.app.post('/api/subscriptions/:id/pause', auth, this.apiPauseSubscription.bind(this));
       this.app.post('/api/subscriptions/:id/resume', auth, this.apiResumeSubscription.bind(this));
+
+      // Referral admin routes
+      this.app.post('/api/referrals', auth, this.apiCreateReferral.bind(this));
+      this.app.get('/api/referrals', auth, this.apiListReferrals.bind(this));
+      this.app.get('/api/referrals/:id', auth, this.apiGetReferral.bind(this));
+      this.app.get('/api/referrals/code/:code', auth, this.apiGetReferralByCode.bind(this));
+      this.app.post('/api/referrals/:id/disable', auth, this.apiDisableReferral.bind(this));
+      this.app.get('/api/referrals/:id/stats', auth, this.apiGetReferralStats.bind(this));
+      this.app.get('/api/commissions', auth, this.apiListCommissions.bind(this));
+      this.app.get('/api/commissions/pending/:address', auth, this.apiGetPendingCommissions.bind(this));
+      this.app.post('/api/commissions/:id/payout', auth, this.apiMarkCommissionPaid.bind(this));
     }
   }
 
@@ -676,7 +706,7 @@ export class PaylinkServer {
 
   private async handleConfirm(req: Request, res: Response): Promise<void> {
     try {
-      const { txHash, chainId: requestedChainId } = req.body;
+      const { txHash, chainId: requestedChainId, referralCode } = req.body;
 
       if (!txHash || typeof txHash !== 'string') {
         res.status(400).json({ status: 'failed', message: 'Missing txHash' });
@@ -757,8 +787,39 @@ export class PaylinkServer {
             confirmed: true,
             createdAt: new Date(),
             confirmedAt: new Date(),
+            referralCode: referralCode || undefined,
           };
           await this.storage.savePayment(payment);
+          
+          // Process referral commission if referral code provided
+          let commission = null;
+          if (referralCode && link.referral?.enabled) {
+            try {
+              commission = await this.referralManager.processReferralPayment(
+                payment,
+                link,
+                referralCode
+              );
+              
+              // Send webhook for commission
+              if (commission && this.webhookManager) {
+                const referral = await this.storage.getReferral(commission.referralId);
+                if (referral) {
+                  this.webhookManager.sendCommissionEvent(
+                    'commission.confirmed',
+                    commission,
+                    referral,
+                    link
+                  ).catch(err => {
+                    console.error('Commission webhook error:', err);
+                  });
+                }
+              }
+            } catch (err) {
+              console.error('Referral processing error:', err);
+              // Don't fail the payment if referral fails
+            }
+          }
           
           // Send webhook notification
           if (this.webhookManager) {
@@ -767,7 +828,15 @@ export class PaylinkServer {
             });
           }
           
-          res.json({ status: 'confirmed', chainId, tokenSymbol });
+          res.json({ 
+            status: 'confirmed', 
+            chainId, 
+            tokenSymbol,
+            referral: commission ? {
+              commissionId: commission.id,
+              commissionAmount: commission.commissionAmount,
+            } : undefined,
+          });
           break;
         }
         case 'pending':
@@ -1086,6 +1155,8 @@ export class PaylinkServer {
         subscription,
         // Multi-use mode
         multiUse,
+        // Referral configuration
+        referral,
       } = req.body;
 
       if (!targetUrl || !amount || !recipientAddress) {
@@ -1120,6 +1191,17 @@ export class PaylinkServer {
         };
       }
 
+      // Parse referral config if provided
+      let referralConfig;
+      if (referral && referral.enabled) {
+        referralConfig = {
+          enabled: true,
+          commissionPercent: referral.commissionPercent ? Number(referral.commissionPercent) : 10,
+          minPayoutThreshold: referral.minPayoutThreshold ? String(referral.minPayoutThreshold) : undefined,
+          expirationDays: referral.expirationDays ? Number(referral.expirationDays) : undefined,
+        };
+      }
+
       const link = await this.createPayLink({
         targetUrl,
         price: { amount: String(amount), tokenSymbol, chainId: Number(chainId) },
@@ -1130,6 +1212,7 @@ export class PaylinkServer {
         expiresAt: expiresIn ? new Date(Date.now() + Number(expiresIn) * 1000) : undefined,
         subscription: subscriptionConfig,
         multiUse: multiUse === true || multiUse === 'true',
+        referral: referralConfig,
       });
 
       const base = this.config.baseUrl || `http://localhost:${this.config.port}`;
@@ -1154,6 +1237,12 @@ export class PaylinkServer {
             maxCycles: link.subscription.maxCycles,
             trialDays: link.subscription.trialDays,
             subscribeUrl: `${base}${this.config.basePath}/${link.id}/subscribe`,
+          } : undefined,
+          referral: link.referral ? {
+            enabled: link.referral.enabled,
+            commissionPercent: link.referral.commissionPercent,
+            minPayoutThreshold: link.referral.minPayoutThreshold,
+            expirationDays: link.referral.expirationDays,
           } : undefined,
         },
       });
@@ -1307,6 +1396,311 @@ export class PaylinkServer {
     try {
       const subscription = await this.resumeSubscription(req.params.id);
       res.json({ success: true, subscription: { id: subscription.id, status: subscription.status } });
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+    }
+  }
+
+  // ========================================
+  // REFERRAL ADMIN ENDPOINTS
+  // ========================================
+
+  private async apiCreateReferral(req: Request, res: Response): Promise<void> {
+    try {
+      const { payLinkId, referrerAddress, code, metadata } = req.body;
+
+      if (!payLinkId || !referrerAddress) {
+        res.status(400).json({ error: 'Missing: payLinkId or referrerAddress' });
+        return;
+      }
+
+      const referral = await this.referralManager.createReferral({
+        payLinkId,
+        referrerAddress,
+        code,
+        metadata,
+      });
+
+      const link = await this.storage.getPayLink(payLinkId);
+      const base = this.config.baseUrl || `http://localhost:${this.config.port}`;
+
+      // Send webhook
+      if (this.webhookManager && link) {
+        this.webhookManager.sendReferralEvent('referral.created', referral, link).catch(err => {
+          console.error('Referral webhook error:', err);
+        });
+      }
+
+      res.status(201).json({
+        success: true,
+        referral: {
+          id: referral.id,
+          code: referral.code,
+          referrerAddress: referral.referrerAddress,
+          payLinkId: referral.payLinkId,
+          status: referral.status,
+          referralUrl: buildReferralUrl(base, payLinkId, referral.code),
+          createdAt: referral.createdAt.toISOString(),
+        },
+      });
+    } catch (error) {
+      console.error('Create referral error:', error);
+      res.status(400).json({ error: (error as Error).message });
+    }
+  }
+
+  private async apiListReferrals(req: Request, res: Response): Promise<void> {
+    try {
+      const { payLinkId, referrerAddress } = req.query;
+
+      let referrals: Referral[];
+      
+      if (payLinkId) {
+        referrals = await this.storage.getReferralsByPayLink(payLinkId as string);
+      } else if (referrerAddress) {
+        referrals = await this.storage.getReferralsByReferrer(referrerAddress as string);
+      } else {
+        referrals = await this.storage.getAllReferrals();
+      }
+
+      const base = this.config.baseUrl || `http://localhost:${this.config.port}`;
+
+      res.json({
+        count: referrals.length,
+        referrals: referrals.map(r => ({
+          id: r.id,
+          code: r.code,
+          referrerAddress: r.referrerAddress,
+          payLinkId: r.payLinkId,
+          totalReferrals: r.totalReferrals,
+          confirmedReferrals: r.confirmedReferrals,
+          totalEarned: r.totalEarned,
+          pendingAmount: r.pendingAmount,
+          paidAmount: r.paidAmount,
+          status: r.status,
+          referralUrl: buildReferralUrl(base, r.payLinkId, r.code),
+          createdAt: r.createdAt.toISOString(),
+        })),
+      });
+    } catch (error) {
+      console.error('List referrals error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+
+  private async apiGetReferral(req: Request, res: Response): Promise<void> {
+    try {
+      const referral = await this.storage.getReferral(req.params.id);
+
+      if (!referral) {
+        res.status(404).json({ error: 'Referral not found' });
+        return;
+      }
+
+      const base = this.config.baseUrl || `http://localhost:${this.config.port}`;
+
+      res.json({
+        id: referral.id,
+        code: referral.code,
+        referrerAddress: referral.referrerAddress,
+        payLinkId: referral.payLinkId,
+        totalReferrals: referral.totalReferrals,
+        confirmedReferrals: referral.confirmedReferrals,
+        totalEarned: referral.totalEarned,
+        pendingAmount: referral.pendingAmount,
+        paidAmount: referral.paidAmount,
+        status: referral.status,
+        referralUrl: buildReferralUrl(base, referral.payLinkId, referral.code),
+        createdAt: referral.createdAt.toISOString(),
+        updatedAt: referral.updatedAt.toISOString(),
+        metadata: referral.metadata,
+      });
+    } catch (error) {
+      console.error('Get referral error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+
+  private async apiGetReferralByCode(req: Request, res: Response): Promise<void> {
+    try {
+      const referral = await this.storage.getReferralByCode(req.params.code);
+
+      if (!referral) {
+        res.status(404).json({ error: 'Referral not found' });
+        return;
+      }
+
+      const base = this.config.baseUrl || `http://localhost:${this.config.port}`;
+
+      res.json({
+        id: referral.id,
+        code: referral.code,
+        referrerAddress: referral.referrerAddress,
+        payLinkId: referral.payLinkId,
+        totalReferrals: referral.totalReferrals,
+        confirmedReferrals: referral.confirmedReferrals,
+        totalEarned: referral.totalEarned,
+        pendingAmount: referral.pendingAmount,
+        status: referral.status,
+        referralUrl: buildReferralUrl(base, referral.payLinkId, referral.code),
+        createdAt: referral.createdAt.toISOString(),
+      });
+    } catch (error) {
+      console.error('Get referral by code error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+
+  private async apiDisableReferral(req: Request, res: Response): Promise<void> {
+    try {
+      const referral = await this.referralManager.disableReferral(req.params.id);
+
+      const link = await this.storage.getPayLink(referral.payLinkId);
+
+      // Send webhook
+      if (this.webhookManager && link) {
+        this.webhookManager.sendReferralEvent('referral.disabled', referral, link).catch(err => {
+          console.error('Referral webhook error:', err);
+        });
+      }
+
+      res.json({ success: true, referral: { id: referral.id, status: referral.status } });
+    } catch (error) {
+      res.status(404).json({ error: (error as Error).message });
+    }
+  }
+
+  private async apiGetReferralStats(req: Request, res: Response): Promise<void> {
+    try {
+      const referral = await this.storage.getReferral(req.params.id);
+
+      if (!referral) {
+        res.status(404).json({ error: 'Referral not found' });
+        return;
+      }
+
+      const stats = await this.referralManager.getStats(referral.referrerAddress);
+
+      res.json({
+        referralId: referral.id,
+        code: referral.code,
+        stats,
+      });
+    } catch (error) {
+      console.error('Get referral stats error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+
+  private async apiListCommissions(req: Request, res: Response): Promise<void> {
+    try {
+      const { referralId, referrerAddress, status } = req.query;
+
+      let commissions: ReferralCommission[];
+
+      if (referralId) {
+        commissions = await this.storage.getCommissionsByReferral(referralId as string);
+      } else if (referrerAddress) {
+        commissions = await this.storage.getCommissionsByReferrer(referrerAddress as string);
+      } else {
+        commissions = await this.storage.getAllCommissions();
+      }
+
+      // Filter by status if provided
+      if (status) {
+        commissions = commissions.filter(c => c.status === status);
+      }
+
+      res.json({
+        count: commissions.length,
+        commissions: commissions.map(c => ({
+          id: c.id,
+          referralId: c.referralId,
+          paymentId: c.paymentId,
+          payLinkId: c.payLinkId,
+          referrerAddress: c.referrerAddress,
+          referredAddress: c.referredAddress,
+          paymentAmount: c.paymentAmount,
+          commissionAmount: c.commissionAmount,
+          commissionPercent: c.commissionPercent,
+          tokenSymbol: c.tokenSymbol,
+          chainId: c.chainId,
+          status: c.status,
+          createdAt: c.createdAt.toISOString(),
+          confirmedAt: c.confirmedAt?.toISOString(),
+          paidAt: c.paidAt?.toISOString(),
+          payoutTxHash: c.payoutTxHash,
+        })),
+      });
+    } catch (error) {
+      console.error('List commissions error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+
+  private async apiGetPendingCommissions(req: Request, res: Response): Promise<void> {
+    try {
+      const commissions = await this.referralManager.getPendingCommissions(req.params.address);
+
+      // Calculate total pending
+      const totalPending = commissions.reduce(
+        (sum, c) => sum + parseFloat(c.commissionAmount),
+        0
+      );
+
+      res.json({
+        address: req.params.address,
+        count: commissions.length,
+        totalPending: totalPending.toString(),
+        commissions: commissions.map(c => ({
+          id: c.id,
+          referralId: c.referralId,
+          commissionAmount: c.commissionAmount,
+          tokenSymbol: c.tokenSymbol,
+          chainId: c.chainId,
+          createdAt: c.createdAt.toISOString(),
+          confirmedAt: c.confirmedAt?.toISOString(),
+        })),
+      });
+    } catch (error) {
+      console.error('Get pending commissions error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+
+  private async apiMarkCommissionPaid(req: Request, res: Response): Promise<void> {
+    try {
+      const { payoutTxHash } = req.body;
+
+      if (!payoutTxHash) {
+        res.status(400).json({ error: 'Missing payoutTxHash' });
+        return;
+      }
+
+      const commission = await this.referralManager.markCommissionPaid(
+        req.params.id,
+        payoutTxHash
+      );
+
+      const referral = await this.storage.getReferral(commission.referralId);
+      const link = await this.storage.getPayLink(commission.payLinkId);
+
+      // Send webhook
+      if (this.webhookManager && referral && link) {
+        this.webhookManager.sendCommissionEvent('commission.paid', commission, referral, link).catch(err => {
+          console.error('Commission webhook error:', err);
+        });
+      }
+
+      res.json({
+        success: true,
+        commission: {
+          id: commission.id,
+          status: commission.status,
+          payoutTxHash: commission.payoutTxHash,
+          paidAt: commission.paidAt?.toISOString(),
+        },
+      });
     } catch (error) {
       res.status(400).json({ error: (error as Error).message });
     }

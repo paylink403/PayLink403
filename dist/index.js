@@ -32,6 +32,7 @@ var index_exports = {};
 __export(index_exports, {
   ChainVerifier: () => ChainVerifier,
   DEFAULT_DISCOUNT_TIERS: () => DEFAULT_DISCOUNT_TIERS,
+  DEFAULT_REFERRAL_CONFIG: () => DEFAULT_REFERRAL_CONFIG,
   MemoryStorage: () => MemoryStorage,
   MockSolanaVerifier: () => MockSolanaVerifier,
   MockVerifier: () => MockVerifier,
@@ -40,13 +41,20 @@ __export(index_exports, {
   PaylinkTokenManager: () => PaylinkTokenManager,
   REASON_MESSAGES: () => REASON_MESSAGES,
   ReasonCode: () => ReasonCode,
+  ReferralManager: () => ReferralManager,
   SOLANA_CHAIN_IDS: () => SOLANA_CHAIN_IDS,
   SolanaVerifier: () => SolanaVerifier,
+  SubscriptionManager: () => SubscriptionManager,
   WebhookManager: () => WebhookManager,
+  buildReferralUrl: () => buildReferralUrl,
+  calculateCommission: () => calculateCommission,
+  calculateNextBillingDate: () => calculateNextBillingDate,
   compareAmounts: () => compareAmounts,
   createPaylinkTokenManager: () => createPaylinkTokenManager,
+  createReferralManager: () => createReferralManager,
   createServer: () => createServer,
   createSolanaVerifier: () => createSolanaVerifier,
+  createSubscriptionManager: () => createSubscriptionManager,
   createWebhookManager: () => createWebhookManager,
   formatPaylinkAmount: () => formatPaylinkAmount,
   generateId: () => generateId,
@@ -55,10 +63,18 @@ __export(index_exports, {
   generatePaymentURI: () => generatePaymentURI,
   generateQRCodeDataURL: () => generateQRCodeDataURL,
   generateQRCodeSVG: () => generateQRCodeSVG,
+  generateReferralCode: () => generateReferralCode,
   generateUUID: () => generateUUID,
+  getIntervalDisplayName: () => getIntervalDisplayName,
+  isCommissionExpired: () => isCommissionExpired,
   isExpired: () => isExpired,
+  isInTrialPeriod: () => isInTrialPeriod,
   isLimitReached: () => isLimitReached,
   isPaylinkToken: () => isPaylinkToken,
+  isPaymentDue: () => isPaymentDue,
+  isValidReferralCode: () => isValidReferralCode,
+  isWithinGracePeriod: () => isWithinGracePeriod,
+  parseReferralCode: () => parseReferralCode,
   sign: () => sign,
   verifyWebhookSignature: () => verifyWebhookSignature
 });
@@ -84,6 +100,11 @@ var ReasonCode = /* @__PURE__ */ ((ReasonCode2) => {
   ReasonCode2["PAYMENT_CHAIN_NOT_SUPPORTED"] = "PAYMENT_CHAIN_NOT_SUPPORTED";
   ReasonCode2["ACCESS_DENIED"] = "ACCESS_DENIED";
   ReasonCode2["INTERNAL_ERROR"] = "INTERNAL_ERROR";
+  ReasonCode2["SUBSCRIPTION_CANCELLED"] = "SUBSCRIPTION_CANCELLED";
+  ReasonCode2["SUBSCRIPTION_PAST_DUE"] = "SUBSCRIPTION_PAST_DUE";
+  ReasonCode2["SUBSCRIPTION_PAUSED"] = "SUBSCRIPTION_PAUSED";
+  ReasonCode2["SUBSCRIPTION_EXPIRED"] = "SUBSCRIPTION_EXPIRED";
+  ReasonCode2["SUBSCRIPTION_MAX_CYCLES_REACHED"] = "SUBSCRIPTION_MAX_CYCLES_REACHED";
   return ReasonCode2;
 })(ReasonCode || {});
 
@@ -93,6 +114,17 @@ var MemoryStorage = class {
   payments = /* @__PURE__ */ new Map();
   paymentsByTx = /* @__PURE__ */ new Map();
   paymentsByLink = /* @__PURE__ */ new Map();
+  paymentsByAddress = /* @__PURE__ */ new Map();
+  subscriptions = /* @__PURE__ */ new Map();
+  subscriptionsByAddress = /* @__PURE__ */ new Map();
+  subscriptionsByLink = /* @__PURE__ */ new Map();
+  referrals = /* @__PURE__ */ new Map();
+  referralsByCode = /* @__PURE__ */ new Map();
+  referralsByLink = /* @__PURE__ */ new Map();
+  referralsByReferrer = /* @__PURE__ */ new Map();
+  commissions = /* @__PURE__ */ new Map();
+  commissionsByReferral = /* @__PURE__ */ new Map();
+  commissionsByReferrer = /* @__PURE__ */ new Map();
   async getPayLink(id) {
     return this.links.get(id) ?? null;
   }
@@ -117,6 +149,10 @@ var MemoryStorage = class {
     const list = this.paymentsByLink.get(payment.payLinkId) ?? [];
     list.push(payment);
     this.paymentsByLink.set(payment.payLinkId, list);
+    if (payment.fromAddress) {
+      const addressKey = `${payment.payLinkId}:${payment.fromAddress.toLowerCase()}`;
+      this.paymentsByAddress.set(addressKey, payment);
+    }
   }
   async getPaymentByTxHash(txHash) {
     return this.paymentsByTx.get(txHash) ?? null;
@@ -125,8 +161,154 @@ var MemoryStorage = class {
     const list = this.paymentsByLink.get(payLinkId) ?? [];
     return list.find((p) => p.confirmed) ?? null;
   }
+  async getConfirmedPaymentByAddress(payLinkId, fromAddress) {
+    const addressKey = `${payLinkId}:${fromAddress.toLowerCase()}`;
+    const payment = this.paymentsByAddress.get(addressKey);
+    if (payment && payment.confirmed) {
+      return payment;
+    }
+    return null;
+  }
+  async getPaymentsByLink(payLinkId) {
+    return this.paymentsByLink.get(payLinkId) ?? [];
+  }
   async getAllPayments() {
     return Array.from(this.payments.values());
+  }
+  // Subscription methods
+  async saveSubscription(subscription) {
+    this.subscriptions.set(subscription.id, { ...subscription });
+    const addressKey = `${subscription.payLinkId}:${subscription.subscriberAddress}`;
+    this.subscriptionsByAddress.set(addressKey, subscription);
+    const linkSubs = this.subscriptionsByLink.get(subscription.payLinkId) ?? [];
+    linkSubs.push(subscription);
+    this.subscriptionsByLink.set(subscription.payLinkId, linkSubs);
+  }
+  async getSubscription(id) {
+    return this.subscriptions.get(id) ?? null;
+  }
+  async updateSubscription(subscription) {
+    if (!this.subscriptions.has(subscription.id)) {
+      throw new Error(`Subscription ${subscription.id} not found`);
+    }
+    const updated = { ...subscription, updatedAt: /* @__PURE__ */ new Date() };
+    this.subscriptions.set(subscription.id, updated);
+    const addressKey = `${subscription.payLinkId}:${subscription.subscriberAddress}`;
+    this.subscriptionsByAddress.set(addressKey, updated);
+    const linkSubs = this.subscriptionsByLink.get(subscription.payLinkId) ?? [];
+    const idx = linkSubs.findIndex((s) => s.id === subscription.id);
+    if (idx !== -1) {
+      linkSubs[idx] = updated;
+    }
+  }
+  async getSubscriptionByAddress(payLinkId, subscriberAddress) {
+    const addressKey = `${payLinkId}:${subscriberAddress}`;
+    return this.subscriptionsByAddress.get(addressKey) ?? null;
+  }
+  async getSubscriptionsByPayLink(payLinkId) {
+    return this.subscriptionsByLink.get(payLinkId) ?? [];
+  }
+  async getSubscriptionsDue(beforeDate) {
+    const result = [];
+    for (const sub of this.subscriptions.values()) {
+      if (sub.status === "active" && sub.nextPaymentDue <= beforeDate) {
+        result.push(sub);
+      }
+    }
+    return result;
+  }
+  async getAllSubscriptions() {
+    return Array.from(this.subscriptions.values());
+  }
+  // Referral methods
+  async saveReferral(referral) {
+    this.referrals.set(referral.id, { ...referral });
+    this.referralsByCode.set(referral.code.toUpperCase(), referral);
+    const linkRefs = this.referralsByLink.get(referral.payLinkId) ?? [];
+    linkRefs.push(referral);
+    this.referralsByLink.set(referral.payLinkId, linkRefs);
+    const referrerKey = referral.referrerAddress.toLowerCase();
+    const referrerRefs = this.referralsByReferrer.get(referrerKey) ?? [];
+    referrerRefs.push(referral);
+    this.referralsByReferrer.set(referrerKey, referrerRefs);
+  }
+  async getReferral(id) {
+    return this.referrals.get(id) ?? null;
+  }
+  async getReferralByCode(code) {
+    return this.referralsByCode.get(code.toUpperCase()) ?? null;
+  }
+  async updateReferral(referral) {
+    if (!this.referrals.has(referral.id)) {
+      throw new Error(`Referral ${referral.id} not found`);
+    }
+    const updated = { ...referral, updatedAt: /* @__PURE__ */ new Date() };
+    this.referrals.set(referral.id, updated);
+    this.referralsByCode.set(referral.code.toUpperCase(), updated);
+    const linkRefs = this.referralsByLink.get(referral.payLinkId) ?? [];
+    const linkIdx = linkRefs.findIndex((r) => r.id === referral.id);
+    if (linkIdx !== -1) {
+      linkRefs[linkIdx] = updated;
+    }
+    const referrerKey = referral.referrerAddress.toLowerCase();
+    const referrerRefs = this.referralsByReferrer.get(referrerKey) ?? [];
+    const referrerIdx = referrerRefs.findIndex((r) => r.id === referral.id);
+    if (referrerIdx !== -1) {
+      referrerRefs[referrerIdx] = updated;
+    }
+  }
+  async getReferralsByPayLink(payLinkId) {
+    return this.referralsByLink.get(payLinkId) ?? [];
+  }
+  async getReferralsByReferrer(referrerAddress) {
+    return this.referralsByReferrer.get(referrerAddress.toLowerCase()) ?? [];
+  }
+  async getAllReferrals() {
+    return Array.from(this.referrals.values());
+  }
+  // Referral commission methods
+  async saveCommission(commission) {
+    this.commissions.set(commission.id, { ...commission });
+    const refComms = this.commissionsByReferral.get(commission.referralId) ?? [];
+    refComms.push(commission);
+    this.commissionsByReferral.set(commission.referralId, refComms);
+    const referrerKey = commission.referrerAddress.toLowerCase();
+    const referrerComms = this.commissionsByReferrer.get(referrerKey) ?? [];
+    referrerComms.push(commission);
+    this.commissionsByReferrer.set(referrerKey, referrerComms);
+  }
+  async getCommission(id) {
+    return this.commissions.get(id) ?? null;
+  }
+  async updateCommission(commission) {
+    if (!this.commissions.has(commission.id)) {
+      throw new Error(`Commission ${commission.id} not found`);
+    }
+    this.commissions.set(commission.id, { ...commission });
+    const refComms = this.commissionsByReferral.get(commission.referralId) ?? [];
+    const refIdx = refComms.findIndex((c) => c.id === commission.id);
+    if (refIdx !== -1) {
+      refComms[refIdx] = commission;
+    }
+    const referrerKey = commission.referrerAddress.toLowerCase();
+    const referrerComms = this.commissionsByReferrer.get(referrerKey) ?? [];
+    const referrerIdx = referrerComms.findIndex((c) => c.id === commission.id);
+    if (referrerIdx !== -1) {
+      referrerComms[referrerIdx] = commission;
+    }
+  }
+  async getCommissionsByReferral(referralId) {
+    return this.commissionsByReferral.get(referralId) ?? [];
+  }
+  async getCommissionsByReferrer(referrerAddress) {
+    return this.commissionsByReferrer.get(referrerAddress.toLowerCase()) ?? [];
+  }
+  async getPendingCommissions(referrerAddress) {
+    const comms = await this.getCommissionsByReferrer(referrerAddress);
+    return comms.filter((c) => c.status === "confirmed");
+  }
+  async getAllCommissions() {
+    return Array.from(this.commissions.values());
   }
   /** Clear all data */
   clear() {
@@ -134,6 +316,17 @@ var MemoryStorage = class {
     this.payments.clear();
     this.paymentsByTx.clear();
     this.paymentsByLink.clear();
+    this.paymentsByAddress.clear();
+    this.subscriptions.clear();
+    this.subscriptionsByAddress.clear();
+    this.subscriptionsByLink.clear();
+    this.referrals.clear();
+    this.referralsByCode.clear();
+    this.referralsByLink.clear();
+    this.referralsByReferrer.clear();
+    this.commissions.clear();
+    this.commissionsByReferral.clear();
+    this.commissionsByReferrer.clear();
   }
 };
 
@@ -180,7 +373,12 @@ var REASON_MESSAGES = {
   PAYMENT_UNDERPAID: "Payment amount is less than required.",
   PAYMENT_CHAIN_NOT_SUPPORTED: "This blockchain is not supported.",
   ACCESS_DENIED: "Access denied.",
-  INTERNAL_ERROR: "An internal error occurred."
+  INTERNAL_ERROR: "An internal error occurred.",
+  SUBSCRIPTION_CANCELLED: "This subscription has been cancelled.",
+  SUBSCRIPTION_PAST_DUE: "Subscription payment is past due.",
+  SUBSCRIPTION_PAUSED: "This subscription is paused.",
+  SUBSCRIPTION_EXPIRED: "This subscription has expired.",
+  SUBSCRIPTION_MAX_CYCLES_REACHED: "Subscription has reached maximum billing cycles."
 };
 
 // lib/chain.ts
@@ -514,7 +712,21 @@ var WebhookManager = class {
         "payment.failed",
         "payment.underpaid",
         "link.created",
-        "link.disabled"
+        "link.disabled",
+        "subscription.created",
+        "subscription.renewed",
+        "subscription.cancelled",
+        "subscription.paused",
+        "subscription.resumed",
+        "subscription.past_due",
+        "subscription.expired",
+        "subscription.trial_ending",
+        "subscription.payment_due",
+        "referral.created",
+        "referral.disabled",
+        "commission.pending",
+        "commission.confirmed",
+        "commission.paid"
       ],
       timeout: config.timeout ?? 1e4,
       retries: config.retries ?? 3,
@@ -584,6 +796,127 @@ var WebhookManager = class {
           description: payLink.description,
           maxUses: payLink.maxUses,
           expiresAt: payLink.expiresAt?.toISOString()
+        }
+      }
+    };
+    return this.send(payload);
+  }
+  /**
+   * Send subscription event
+   */
+  async sendSubscriptionEvent(event, subscription, payLink) {
+    if (!this.isEventEnabled(event)) {
+      return null;
+    }
+    const payload = {
+      event,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      eventId: this.generateEventId(),
+      data: {
+        type: "subscription",
+        subscription: {
+          id: subscription.id,
+          payLinkId: subscription.payLinkId,
+          subscriberAddress: subscription.subscriberAddress,
+          status: subscription.status,
+          currentPeriodStart: subscription.currentPeriodStart.toISOString(),
+          currentPeriodEnd: subscription.currentPeriodEnd.toISOString(),
+          nextPaymentDue: subscription.nextPaymentDue.toISOString(),
+          cycleCount: subscription.cycleCount,
+          createdAt: subscription.createdAt.toISOString(),
+          cancelledAt: subscription.cancelledAt?.toISOString(),
+          pausedAt: subscription.pausedAt?.toISOString(),
+          trialEndsAt: subscription.trialEndsAt?.toISOString()
+        },
+        payLink: {
+          id: payLink.id,
+          targetUrl: payLink.targetUrl,
+          price: payLink.price,
+          recipientAddress: payLink.recipientAddress,
+          subscription: payLink.subscription ? {
+            interval: payLink.subscription.interval,
+            intervalCount: payLink.subscription.intervalCount
+          } : void 0
+        }
+      }
+    };
+    return this.send(payload);
+  }
+  /**
+   * Send referral event
+   */
+  async sendReferralEvent(event, referral, payLink) {
+    if (!this.isEventEnabled(event)) {
+      return null;
+    }
+    const payload = {
+      event,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      eventId: this.generateEventId(),
+      data: {
+        type: "referral",
+        referral: {
+          id: referral.id,
+          code: referral.code,
+          referrerAddress: referral.referrerAddress,
+          payLinkId: referral.payLinkId,
+          totalReferrals: referral.totalReferrals,
+          confirmedReferrals: referral.confirmedReferrals,
+          totalEarned: referral.totalEarned,
+          pendingAmount: referral.pendingAmount,
+          status: referral.status,
+          createdAt: referral.createdAt.toISOString()
+        },
+        payLink: {
+          id: payLink.id,
+          targetUrl: payLink.targetUrl,
+          price: payLink.price,
+          recipientAddress: payLink.recipientAddress
+        }
+      }
+    };
+    return this.send(payload);
+  }
+  /**
+   * Send commission event
+   */
+  async sendCommissionEvent(event, commission, referral, payLink) {
+    if (!this.isEventEnabled(event)) {
+      return null;
+    }
+    const payload = {
+      event,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      eventId: this.generateEventId(),
+      data: {
+        type: "commission",
+        commission: {
+          id: commission.id,
+          referralId: commission.referralId,
+          paymentId: commission.paymentId,
+          referrerAddress: commission.referrerAddress,
+          referredAddress: commission.referredAddress,
+          paymentAmount: commission.paymentAmount,
+          commissionAmount: commission.commissionAmount,
+          commissionPercent: commission.commissionPercent,
+          tokenSymbol: commission.tokenSymbol,
+          chainId: commission.chainId,
+          status: commission.status,
+          createdAt: commission.createdAt.toISOString(),
+          confirmedAt: commission.confirmedAt?.toISOString(),
+          paidAt: commission.paidAt?.toISOString(),
+          payoutTxHash: commission.payoutTxHash
+        },
+        referral: {
+          id: referral.id,
+          code: referral.code,
+          referrerAddress: referral.referrerAddress
+        },
+        payLink: {
+          id: payLink.id,
+          targetUrl: payLink.targetUrl,
+          price: payLink.price,
+          recipientAddress: payLink.recipientAddress
         }
       }
     };
@@ -1068,6 +1401,593 @@ function getFormatBits(ecLevel, mask) {
   return format.split("").map((c) => c === "1");
 }
 
+// lib/subscription.ts
+function calculateNextBillingDate(fromDate, interval, intervalCount = 1) {
+  const date = new Date(fromDate);
+  switch (interval) {
+    case "daily":
+      date.setDate(date.getDate() + intervalCount);
+      break;
+    case "weekly":
+      date.setDate(date.getDate() + 7 * intervalCount);
+      break;
+    case "monthly":
+      date.setMonth(date.getMonth() + intervalCount);
+      break;
+    case "yearly":
+      date.setFullYear(date.getFullYear() + intervalCount);
+      break;
+  }
+  return date;
+}
+function isWithinGracePeriod(nextPaymentDue, gracePeriodHours = 24) {
+  const now = /* @__PURE__ */ new Date();
+  const graceEnd = new Date(nextPaymentDue);
+  graceEnd.setHours(graceEnd.getHours() + gracePeriodHours);
+  return now <= graceEnd;
+}
+function isPaymentDue(subscription) {
+  const now = /* @__PURE__ */ new Date();
+  return now >= subscription.nextPaymentDue;
+}
+function isInTrialPeriod(subscription) {
+  if (!subscription.trialEndsAt) return false;
+  return /* @__PURE__ */ new Date() < subscription.trialEndsAt;
+}
+function getIntervalDisplayName(interval, count = 1) {
+  const labels = {
+    daily: ["day", "days"],
+    weekly: ["week", "weeks"],
+    monthly: ["month", "months"],
+    yearly: ["year", "years"]
+  };
+  const [singular, plural] = labels[interval];
+  if (count === 1) return singular;
+  return `${count} ${plural}`;
+}
+var SubscriptionManager = class {
+  storage;
+  checkInterval = null;
+  constructor(storage) {
+    this.storage = storage;
+  }
+  /**
+   * Create a new subscription
+   */
+  async createSubscription(payLink, input) {
+    if (!payLink.subscription) {
+      throw new Error("PayLink is not configured for subscriptions");
+    }
+    const config = payLink.subscription;
+    const now = /* @__PURE__ */ new Date();
+    const existing = await this.storage.getSubscriptionByAddress(
+      payLink.id,
+      input.subscriberAddress
+    );
+    if (existing && existing.status === "active") {
+      throw new Error("Active subscription already exists for this address");
+    }
+    const trialEndsAt = config.trialDays ? new Date(now.getTime() + config.trialDays * 24 * 60 * 60 * 1e3) : void 0;
+    const periodStart = trialEndsAt ?? now;
+    const periodEnd = calculateNextBillingDate(
+      periodStart,
+      config.interval,
+      config.intervalCount
+    );
+    const subscription = {
+      id: generateId(12),
+      payLinkId: payLink.id,
+      subscriberAddress: input.subscriberAddress,
+      status: "active",
+      currentPeriodStart: periodStart,
+      currentPeriodEnd: periodEnd,
+      nextPaymentDue: trialEndsAt ?? now,
+      cycleCount: 0,
+      createdAt: now,
+      updatedAt: now,
+      trialEndsAt,
+      metadata: input.metadata
+    };
+    await this.storage.saveSubscription(subscription);
+    return subscription;
+  }
+  /**
+   * Process payment for subscription
+   */
+  async processPayment(subscription, payment, payLink) {
+    if (!payLink.subscription) {
+      throw new Error("PayLink is not configured for subscriptions");
+    }
+    const config = payLink.subscription;
+    const now = /* @__PURE__ */ new Date();
+    const newPeriodStart = subscription.currentPeriodEnd;
+    const newPeriodEnd = calculateNextBillingDate(
+      newPeriodStart,
+      config.interval,
+      config.intervalCount
+    );
+    subscription.currentPeriodStart = newPeriodStart;
+    subscription.currentPeriodEnd = newPeriodEnd;
+    subscription.nextPaymentDue = newPeriodEnd;
+    subscription.cycleCount += 1;
+    subscription.lastPaymentId = payment.id;
+    subscription.status = "active";
+    subscription.updatedAt = now;
+    if (config.maxCycles && subscription.cycleCount >= config.maxCycles) {
+      subscription.status = "expired";
+    }
+    await this.storage.updateSubscription(subscription);
+    return subscription;
+  }
+  /**
+   * Cancel subscription
+   */
+  async cancelSubscription(subscriptionId, immediate = false) {
+    const subscription = await this.storage.getSubscription(subscriptionId);
+    if (!subscription) {
+      throw new Error("Subscription not found");
+    }
+    subscription.status = "cancelled";
+    subscription.cancelledAt = /* @__PURE__ */ new Date();
+    subscription.updatedAt = /* @__PURE__ */ new Date();
+    await this.storage.updateSubscription(subscription);
+    return subscription;
+  }
+  /**
+   * Pause subscription
+   */
+  async pauseSubscription(subscriptionId) {
+    const subscription = await this.storage.getSubscription(subscriptionId);
+    if (!subscription) {
+      throw new Error("Subscription not found");
+    }
+    if (subscription.status !== "active") {
+      throw new Error("Only active subscriptions can be paused");
+    }
+    subscription.status = "paused";
+    subscription.pausedAt = /* @__PURE__ */ new Date();
+    subscription.updatedAt = /* @__PURE__ */ new Date();
+    await this.storage.updateSubscription(subscription);
+    return subscription;
+  }
+  /**
+   * Resume subscription
+   */
+  async resumeSubscription(subscriptionId) {
+    const subscription = await this.storage.getSubscription(subscriptionId);
+    if (!subscription) {
+      throw new Error("Subscription not found");
+    }
+    if (subscription.status !== "paused") {
+      throw new Error("Only paused subscriptions can be resumed");
+    }
+    subscription.status = "active";
+    subscription.pausedAt = void 0;
+    subscription.updatedAt = /* @__PURE__ */ new Date();
+    await this.storage.updateSubscription(subscription);
+    return subscription;
+  }
+  /**
+   * Check subscription access
+   * Returns true if subscription grants access to the resource
+   */
+  async checkAccess(subscription, payLink) {
+    if (subscription.status === "cancelled") {
+      return {
+        hasAccess: false,
+        reason: "Subscription has been cancelled"
+      };
+    }
+    if (subscription.status === "expired") {
+      return {
+        hasAccess: false,
+        reason: "Subscription has expired"
+      };
+    }
+    if (subscription.status === "paused") {
+      return {
+        hasAccess: false,
+        reason: "Subscription is paused"
+      };
+    }
+    if (isInTrialPeriod(subscription)) {
+      return { hasAccess: true };
+    }
+    if (isPaymentDue(subscription)) {
+      const gracePeriodHours = payLink.subscription?.gracePeriodHours ?? 24;
+      if (isWithinGracePeriod(subscription.nextPaymentDue, gracePeriodHours)) {
+        return {
+          hasAccess: true,
+          requiresPayment: true
+        };
+      }
+      return {
+        hasAccess: false,
+        reason: "Payment is past due",
+        requiresPayment: true
+      };
+    }
+    return { hasAccess: true };
+  }
+  /**
+   * Mark subscription as past due
+   */
+  async markPastDue(subscriptionId) {
+    const subscription = await this.storage.getSubscription(subscriptionId);
+    if (!subscription) {
+      throw new Error("Subscription not found");
+    }
+    subscription.status = "past_due";
+    subscription.updatedAt = /* @__PURE__ */ new Date();
+    await this.storage.updateSubscription(subscription);
+    return subscription;
+  }
+  /**
+   * Get subscription by ID
+   */
+  async getSubscription(id) {
+    return this.storage.getSubscription(id);
+  }
+  /**
+   * Get subscription by subscriber address
+   */
+  async getSubscriptionByAddress(payLinkId, subscriberAddress) {
+    return this.storage.getSubscriptionByAddress(payLinkId, subscriberAddress);
+  }
+  /**
+   * Get all subscriptions due for payment
+   */
+  async getDueSubscriptions() {
+    return this.storage.getSubscriptionsDue(/* @__PURE__ */ new Date());
+  }
+  /**
+   * Start periodic check for due subscriptions
+   */
+  startPeriodicCheck(intervalMs = 6e4, onDue) {
+    if (this.checkInterval) {
+      clearInterval(this.checkInterval);
+    }
+    this.checkInterval = setInterval(async () => {
+      try {
+        const dueSubscriptions = await this.getDueSubscriptions();
+        for (const sub of dueSubscriptions) {
+          if (onDue) {
+            onDue(sub);
+          }
+        }
+      } catch (error) {
+        console.error("Subscription check error:", error);
+      }
+    }, intervalMs);
+  }
+  /**
+   * Stop periodic check
+   */
+  stopPeriodicCheck() {
+    if (this.checkInterval) {
+      clearInterval(this.checkInterval);
+      this.checkInterval = null;
+    }
+  }
+};
+function createSubscriptionManager(storage) {
+  return new SubscriptionManager(storage);
+}
+
+// lib/referral.ts
+var DEFAULT_REFERRAL_CONFIG = {
+  enabled: true,
+  commissionPercent: 10,
+  minPayoutThreshold: void 0,
+  expirationDays: void 0
+};
+function generateReferralCode(length = 8) {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let code = "";
+  for (let i = 0; i < length; i++) {
+    code += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return code;
+}
+function isValidReferralCode(code) {
+  return /^[A-Z0-9]{4,16}$/i.test(code);
+}
+function calculateCommission(paymentAmount, commissionPercent) {
+  const amount = parseFloat(paymentAmount);
+  const commission = amount * commissionPercent / 100;
+  return commission.toFixed(8).replace(/\.?0+$/, "");
+}
+function isCommissionExpired(createdAt, expirationDays) {
+  if (!expirationDays) return false;
+  const expiresAt = new Date(createdAt);
+  expiresAt.setDate(expiresAt.getDate() + expirationDays);
+  return /* @__PURE__ */ new Date() > expiresAt;
+}
+var ReferralManager = class {
+  storage;
+  constructor(storage) {
+    this.storage = storage;
+  }
+  /**
+   * Create a new referral
+   */
+  async createReferral(input) {
+    const payLink = await this.storage.getPayLink(input.payLinkId);
+    if (!payLink) {
+      throw new Error("PayLink not found");
+    }
+    if (!payLink.referral?.enabled) {
+      throw new Error("Referral program is not enabled for this link");
+    }
+    const existingReferrals = await this.storage.getReferralsByPayLink(input.payLinkId);
+    const existing = existingReferrals.find(
+      (r) => r.referrerAddress.toLowerCase() === input.referrerAddress.toLowerCase()
+    );
+    if (existing) {
+      throw new Error("Referral already exists for this address");
+    }
+    let code = input.code;
+    if (code) {
+      if (!isValidReferralCode(code)) {
+        throw new Error("Invalid referral code format");
+      }
+      const existingCode = await this.storage.getReferralByCode(code);
+      if (existingCode) {
+        throw new Error("Referral code already in use");
+      }
+    } else {
+      let attempts = 0;
+      do {
+        code = generateReferralCode();
+        const existingCode = await this.storage.getReferralByCode(code);
+        if (!existingCode) break;
+        attempts++;
+      } while (attempts < 10);
+      if (attempts >= 10) {
+        throw new Error("Failed to generate unique referral code");
+      }
+    }
+    const now = /* @__PURE__ */ new Date();
+    const referral = {
+      id: generateId(12),
+      code,
+      referrerAddress: input.referrerAddress,
+      payLinkId: input.payLinkId,
+      totalReferrals: 0,
+      confirmedReferrals: 0,
+      totalEarned: "0",
+      pendingAmount: "0",
+      paidAmount: "0",
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+      metadata: input.metadata
+    };
+    await this.storage.saveReferral(referral);
+    return referral;
+  }
+  /**
+   * Get referral by code
+   */
+  async getReferralByCode(code) {
+    return this.storage.getReferralByCode(code.toUpperCase());
+  }
+  /**
+   * Get referral by ID
+   */
+  async getReferral(id) {
+    return this.storage.getReferral(id);
+  }
+  /**
+   * Get all referrals for a PayLink
+   */
+  async getReferralsByPayLink(payLinkId) {
+    return this.storage.getReferralsByPayLink(payLinkId);
+  }
+  /**
+   * Get all referrals for a referrer
+   */
+  async getReferralsByReferrer(referrerAddress) {
+    return this.storage.getReferralsByReferrer(referrerAddress);
+  }
+  /**
+   * Process payment with referral
+   * Creates commission record and updates referral stats
+   */
+  async processReferralPayment(payment, payLink, referralCode) {
+    const referral = await this.storage.getReferralByCode(referralCode.toUpperCase());
+    if (!referral) {
+      console.warn(`Referral code not found: ${referralCode}`);
+      return null;
+    }
+    if (referral.payLinkId !== payLink.id) {
+      console.warn(`Referral code ${referralCode} is not valid for this link`);
+      return null;
+    }
+    if (referral.status !== "active") {
+      console.warn(`Referral ${referral.id} is not active`);
+      return null;
+    }
+    if (!payLink.referral?.enabled) {
+      console.warn(`Referral program is not enabled for link ${payLink.id}`);
+      return null;
+    }
+    if (referral.referrerAddress.toLowerCase() === payment.fromAddress.toLowerCase()) {
+      console.warn("Self-referral detected, skipping commission");
+      return null;
+    }
+    const commissionPercent = payLink.referral.commissionPercent;
+    const commissionAmount = calculateCommission(payment.amount, commissionPercent);
+    const now = /* @__PURE__ */ new Date();
+    const commission = {
+      id: generateId(12),
+      referralId: referral.id,
+      paymentId: payment.id,
+      payLinkId: payLink.id,
+      referrerAddress: referral.referrerAddress,
+      referredAddress: payment.fromAddress,
+      paymentAmount: payment.amount,
+      commissionAmount,
+      commissionPercent,
+      tokenSymbol: payment.tokenSymbol || payLink.price.tokenSymbol,
+      chainId: payment.chainId,
+      status: payment.confirmed ? "confirmed" : "pending",
+      createdAt: now,
+      confirmedAt: payment.confirmed ? now : void 0
+    };
+    await this.storage.saveCommission(commission);
+    referral.totalReferrals += 1;
+    if (payment.confirmed) {
+      referral.confirmedReferrals += 1;
+      referral.pendingAmount = this.addAmounts(referral.pendingAmount, commissionAmount);
+      referral.totalEarned = this.addAmounts(referral.totalEarned, commissionAmount);
+    }
+    referral.updatedAt = now;
+    await this.storage.updateReferral(referral);
+    return commission;
+  }
+  /**
+   * Confirm pending commission (when payment is confirmed)
+   */
+  async confirmCommission(paymentId) {
+    const commissions = await this.storage.getAllCommissions();
+    const commission = commissions.find((c) => c.paymentId === paymentId);
+    if (!commission) {
+      return null;
+    }
+    if (commission.status !== "pending") {
+      return commission;
+    }
+    const now = /* @__PURE__ */ new Date();
+    commission.status = "confirmed";
+    commission.confirmedAt = now;
+    await this.storage.updateCommission(commission);
+    const referral = await this.storage.getReferral(commission.referralId);
+    if (referral) {
+      referral.confirmedReferrals += 1;
+      referral.pendingAmount = this.addAmounts(referral.pendingAmount, commission.commissionAmount);
+      referral.totalEarned = this.addAmounts(referral.totalEarned, commission.commissionAmount);
+      referral.updatedAt = now;
+      await this.storage.updateReferral(referral);
+    }
+    return commission;
+  }
+  /**
+   * Mark commission as paid
+   */
+  async markCommissionPaid(commissionId, payoutTxHash) {
+    const commission = await this.storage.getCommission(commissionId);
+    if (!commission) {
+      throw new Error("Commission not found");
+    }
+    if (commission.status !== "confirmed") {
+      throw new Error("Commission is not in confirmed status");
+    }
+    const now = /* @__PURE__ */ new Date();
+    commission.status = "paid";
+    commission.paidAt = now;
+    commission.payoutTxHash = payoutTxHash;
+    await this.storage.updateCommission(commission);
+    const referral = await this.storage.getReferral(commission.referralId);
+    if (referral) {
+      referral.pendingAmount = this.subtractAmounts(referral.pendingAmount, commission.commissionAmount);
+      referral.paidAmount = this.addAmounts(referral.paidAmount, commission.commissionAmount);
+      referral.updatedAt = now;
+      await this.storage.updateReferral(referral);
+    }
+    return commission;
+  }
+  /**
+   * Get referral statistics for a referrer
+   */
+  async getStats(referrerAddress) {
+    const commissions = await this.storage.getCommissionsByReferrer(referrerAddress);
+    let totalReferrals = 0;
+    let confirmedReferrals = 0;
+    let pendingReferrals = 0;
+    let totalEarned = 0;
+    let pendingPayout = 0;
+    let paidOut = 0;
+    for (const commission of commissions) {
+      totalReferrals++;
+      if (commission.status === "confirmed") {
+        confirmedReferrals++;
+        pendingPayout += parseFloat(commission.commissionAmount);
+        totalEarned += parseFloat(commission.commissionAmount);
+      } else if (commission.status === "pending") {
+        pendingReferrals++;
+      } else if (commission.status === "paid") {
+        confirmedReferrals++;
+        paidOut += parseFloat(commission.commissionAmount);
+        totalEarned += parseFloat(commission.commissionAmount);
+      }
+    }
+    const conversionRate = totalReferrals > 0 ? confirmedReferrals / totalReferrals * 100 : 0;
+    return {
+      totalReferrals,
+      confirmedReferrals,
+      pendingReferrals,
+      totalEarned: totalEarned.toString(),
+      pendingPayout: pendingPayout.toString(),
+      paidOut: paidOut.toString(),
+      conversionRate: Math.round(conversionRate * 100) / 100
+    };
+  }
+  /**
+   * Disable a referral
+   */
+  async disableReferral(referralId) {
+    const referral = await this.storage.getReferral(referralId);
+    if (!referral) {
+      throw new Error("Referral not found");
+    }
+    referral.status = "disabled";
+    referral.updatedAt = /* @__PURE__ */ new Date();
+    await this.storage.updateReferral(referral);
+    return referral;
+  }
+  /**
+   * Get pending commissions for payout
+   */
+  async getPendingCommissions(referrerAddress) {
+    return this.storage.getPendingCommissions(referrerAddress);
+  }
+  /**
+   * Helper: Add string amounts
+   */
+  addAmounts(a, b) {
+    const result = parseFloat(a) + parseFloat(b);
+    return result.toFixed(8).replace(/\.?0+$/, "");
+  }
+  /**
+   * Helper: Subtract string amounts
+   */
+  subtractAmounts(a, b) {
+    const result = parseFloat(a) - parseFloat(b);
+    return Math.max(0, result).toFixed(8).replace(/\.?0+$/, "");
+  }
+};
+function createReferralManager(storage) {
+  return new ReferralManager(storage);
+}
+function buildReferralUrl(baseUrl, linkId, referralCode) {
+  return `${baseUrl}/pay/${linkId}?ref=${referralCode}`;
+}
+function parseReferralCode(input) {
+  try {
+    const url = new URL(input);
+    const ref = url.searchParams.get("ref");
+    if (ref && isValidReferralCode(ref)) {
+      return ref.toUpperCase();
+    }
+  } catch {
+    if (isValidReferralCode(input)) {
+      return input.toUpperCase();
+    }
+  }
+  return null;
+}
+
 // lib/server.ts
 var PaylinkServer = class {
   app;
@@ -1075,6 +1995,9 @@ var PaylinkServer = class {
   storage;
   verifiers;
   webhookManager;
+  subscriptionManager;
+  referralManager;
+  subscriptionCheckInterval;
   constructor(config) {
     this.config = {
       port: config.port ?? 3e3,
@@ -1090,6 +2013,8 @@ var PaylinkServer = class {
     };
     this.storage = new MemoryStorage();
     this.verifiers = /* @__PURE__ */ new Map();
+    this.subscriptionManager = new SubscriptionManager(this.storage);
+    this.referralManager = new ReferralManager(this.storage);
     if (config.webhook?.url) {
       this.webhookManager = new WebhookManager(config.webhook);
     }
@@ -1139,15 +2064,30 @@ var PaylinkServer = class {
    */
   setStorage(storage) {
     this.storage = storage;
+    this.subscriptionManager = new SubscriptionManager(storage);
+    this.referralManager = new ReferralManager(storage);
+  }
+  /**
+   * Get subscription manager
+   */
+  getSubscriptionManager() {
+    return this.subscriptionManager;
+  }
+  /**
+   * Get referral manager
+   */
+  getReferralManager() {
+    return this.referralManager;
   }
   /**
    * Start server
    */
   start() {
+    this.startSubscriptionCheck();
     this.app.listen(this.config.port, () => {
       console.log("");
       console.log("\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557");
-      console.log("\u2551              Paylink Protocol Server v1.1.0              \u2551");
+      console.log("\u2551              Paylink Protocol Server v1.6.0              \u2551");
       console.log("\u2560\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2563");
       console.log(`\u2551  Port:     ${String(this.config.port).padEnd(44)}\u2551`);
       console.log(`\u2551  Base URL: ${(this.config.baseUrl || "http://localhost:" + this.config.port).padEnd(44)}\u2551`);
@@ -1186,6 +2126,7 @@ var PaylinkServer = class {
       id: generateId(),
       targetUrl: input.targetUrl,
       price: input.price,
+      paymentOptions: input.paymentOptions,
       recipientAddress: input.recipientAddress,
       status: "active",
       createdAt: now,
@@ -1194,7 +2135,10 @@ var PaylinkServer = class {
       maxUses: input.maxUses,
       usedCount: 0,
       expiresAt: input.expiresAt,
-      metadata: input.metadata
+      metadata: input.metadata,
+      subscription: input.subscription,
+      multiUse: input.multiUse,
+      referral: input.referral
     };
     await this.storage.savePayLink(payLink);
     if (this.webhookManager) {
@@ -1225,6 +2169,119 @@ var PaylinkServer = class {
     }
   }
   // ========================================
+  // SUBSCRIPTION METHODS
+  // ========================================
+  /**
+   * Create a subscription for a subscriber
+   */
+  async createSubscription(payLinkId, subscriberAddress, metadata) {
+    const link = await this.storage.getPayLink(payLinkId);
+    if (!link) throw new Error("PayLink not found");
+    if (!link.subscription) throw new Error("PayLink is not a subscription link");
+    const subscription = await this.subscriptionManager.createSubscription(link, {
+      payLinkId,
+      subscriberAddress,
+      metadata
+    });
+    if (this.webhookManager) {
+      this.webhookManager.sendSubscriptionEvent("subscription.created", subscription, link).catch((err) => {
+        console.error("Webhook error:", err);
+      });
+    }
+    return subscription;
+  }
+  /**
+   * Cancel a subscription
+   */
+  async cancelSubscription(subscriptionId) {
+    const subscription = await this.subscriptionManager.cancelSubscription(subscriptionId);
+    const link = await this.storage.getPayLink(subscription.payLinkId);
+    if (this.webhookManager && link) {
+      this.webhookManager.sendSubscriptionEvent("subscription.cancelled", subscription, link).catch((err) => {
+        console.error("Webhook error:", err);
+      });
+    }
+    return subscription;
+  }
+  /**
+   * Pause a subscription
+   */
+  async pauseSubscription(subscriptionId) {
+    const subscription = await this.subscriptionManager.pauseSubscription(subscriptionId);
+    const link = await this.storage.getPayLink(subscription.payLinkId);
+    if (this.webhookManager && link) {
+      this.webhookManager.sendSubscriptionEvent("subscription.paused", subscription, link).catch((err) => {
+        console.error("Webhook error:", err);
+      });
+    }
+    return subscription;
+  }
+  /**
+   * Resume a subscription
+   */
+  async resumeSubscription(subscriptionId) {
+    const subscription = await this.subscriptionManager.resumeSubscription(subscriptionId);
+    const link = await this.storage.getPayLink(subscription.payLinkId);
+    if (this.webhookManager && link) {
+      this.webhookManager.sendSubscriptionEvent("subscription.resumed", subscription, link).catch((err) => {
+        console.error("Webhook error:", err);
+      });
+    }
+    return subscription;
+  }
+  /**
+   * Get subscription by ID
+   */
+  async getSubscription(id) {
+    return this.subscriptionManager.getSubscription(id);
+  }
+  /**
+   * Start periodic subscription check
+   */
+  startSubscriptionCheck() {
+    this.subscriptionCheckInterval = setInterval(async () => {
+      try {
+        const dueSubscriptions = await this.subscriptionManager.getDueSubscriptions();
+        for (const sub of dueSubscriptions) {
+          const link = await this.storage.getPayLink(sub.payLinkId);
+          if (!link) continue;
+          const gracePeriodHours = link.subscription?.gracePeriodHours ?? 24;
+          const graceEnd = new Date(sub.nextPaymentDue);
+          graceEnd.setHours(graceEnd.getHours() + gracePeriodHours);
+          const now = /* @__PURE__ */ new Date();
+          if (now > graceEnd && sub.status === "active") {
+            await this.subscriptionManager.markPastDue(sub.id);
+            if (this.webhookManager) {
+              const updated = await this.subscriptionManager.getSubscription(sub.id);
+              if (updated) {
+                this.webhookManager.sendSubscriptionEvent("subscription.past_due", updated, link).catch((err) => {
+                  console.error("Webhook error:", err);
+                });
+              }
+            }
+          } else if (sub.status === "active") {
+            if (this.webhookManager) {
+              this.webhookManager.sendSubscriptionEvent("subscription.payment_due", sub, link).catch((err) => {
+                console.error("Webhook error:", err);
+              });
+            }
+          }
+        }
+      } catch (error) {
+        console.error("Subscription check error:", error);
+      }
+    }, 6e4);
+  }
+  /**
+   * Stop subscription check
+   */
+  stopSubscriptionCheck() {
+    if (this.subscriptionCheckInterval) {
+      clearInterval(this.subscriptionCheckInterval);
+      this.subscriptionCheckInterval = void 0;
+    }
+  }
+  // ========================================
   // PRIVATE METHODS
   // ========================================
   setupMiddleware() {
@@ -1250,12 +2307,13 @@ var PaylinkServer = class {
       const base = this.config.baseUrl || `http://localhost:${this.config.port}`;
       res.json({
         name: "Paylink Protocol",
-        version: "1.0.0",
+        version: "1.6.0",
         chains: this.config.chains.map((c) => ({ id: c.chainId, name: c.name, symbol: c.symbol })),
         endpoints: {
           paylink: `${base}${this.config.basePath}/:id`,
           status: `${base}${this.config.basePath}/:id/status`,
-          confirm: `${base}${this.config.basePath}/:id/confirm`
+          confirm: `${base}${this.config.basePath}/:id/confirm`,
+          subscribe: `${base}${this.config.basePath}/:id/subscribe`
         }
       });
     });
@@ -1263,6 +2321,8 @@ var PaylinkServer = class {
     this.app.get(`${this.config.basePath}/:id/status`, this.handleStatus.bind(this));
     this.app.post(`${this.config.basePath}/:id/confirm`, this.handleConfirm.bind(this));
     this.app.get(`${this.config.basePath}/:id/qr`, this.handleQRCode.bind(this));
+    this.app.post(`${this.config.basePath}/:id/subscribe`, this.handleSubscribe.bind(this));
+    this.app.get(`${this.config.basePath}/:id/subscription`, this.handleGetSubscription.bind(this));
     if (this.config.apiKey) {
       const auth = this.authMiddleware.bind(this);
       this.app.post("/api/links", auth, this.apiCreateLink.bind(this));
@@ -1270,6 +2330,20 @@ var PaylinkServer = class {
       this.app.get("/api/links/:id", auth, this.apiGetLink.bind(this));
       this.app.delete("/api/links/:id", auth, this.apiDeleteLink.bind(this));
       this.app.get("/api/payments", auth, this.apiListPayments.bind(this));
+      this.app.get("/api/subscriptions", auth, this.apiListSubscriptions.bind(this));
+      this.app.get("/api/subscriptions/:id", auth, this.apiGetSubscription.bind(this));
+      this.app.post("/api/subscriptions/:id/cancel", auth, this.apiCancelSubscription.bind(this));
+      this.app.post("/api/subscriptions/:id/pause", auth, this.apiPauseSubscription.bind(this));
+      this.app.post("/api/subscriptions/:id/resume", auth, this.apiResumeSubscription.bind(this));
+      this.app.post("/api/referrals", auth, this.apiCreateReferral.bind(this));
+      this.app.get("/api/referrals", auth, this.apiListReferrals.bind(this));
+      this.app.get("/api/referrals/:id", auth, this.apiGetReferral.bind(this));
+      this.app.get("/api/referrals/code/:code", auth, this.apiGetReferralByCode.bind(this));
+      this.app.post("/api/referrals/:id/disable", auth, this.apiDisableReferral.bind(this));
+      this.app.get("/api/referrals/:id/stats", auth, this.apiGetReferralStats.bind(this));
+      this.app.get("/api/commissions", auth, this.apiListCommissions.bind(this));
+      this.app.get("/api/commissions/pending/:address", auth, this.apiGetPendingCommissions.bind(this));
+      this.app.post("/api/commissions/:id/payout", auth, this.apiMarkCommissionPaid.bind(this));
     }
   }
   authMiddleware(req, res, next) {
@@ -1300,11 +2374,73 @@ var PaylinkServer = class {
         });
         return;
       }
-      if (isLimitReached(link.usedCount, link.maxUses)) {
+      if (!link.subscription && !link.multiUse && isLimitReached(link.usedCount, link.maxUses)) {
         this.send403(res, "LINK_USAGE_LIMIT_REACHED" /* LINK_USAGE_LIMIT_REACHED */, link.id, {
           maxUses: link.maxUses,
           usedCount: link.usedCount
         });
+        return;
+      }
+      if (link.subscription) {
+        const subscriberAddress = req.query.subscriber;
+        if (subscriberAddress) {
+          const subscription = await this.storage.getSubscriptionByAddress(link.id, subscriberAddress);
+          if (subscription) {
+            const access = await this.subscriptionManager.checkAccess(subscription, link);
+            if (access.hasAccess) {
+              res.redirect(302, link.targetUrl);
+              return;
+            }
+            if (subscription.status === "cancelled") {
+              this.send403(res, "SUBSCRIPTION_CANCELLED" /* SUBSCRIPTION_CANCELLED */, link.id, {
+                subscriptionId: subscription.id,
+                cancelledAt: subscription.cancelledAt?.toISOString()
+              });
+              return;
+            }
+            if (subscription.status === "paused") {
+              this.send403(res, "SUBSCRIPTION_PAUSED" /* SUBSCRIPTION_PAUSED */, link.id, {
+                subscriptionId: subscription.id,
+                pausedAt: subscription.pausedAt?.toISOString()
+              });
+              return;
+            }
+            if (subscription.status === "expired") {
+              this.send403(res, "SUBSCRIPTION_EXPIRED" /* SUBSCRIPTION_EXPIRED */, link.id, {
+                subscriptionId: subscription.id
+              });
+              return;
+            }
+            if (subscription.status === "past_due") {
+              this.send402(res, link, subscription);
+              return;
+            }
+          }
+        }
+        this.send402(res, link);
+        return;
+      }
+      if (link.multiUse) {
+        const payerAddress = req.query.payer;
+        if (!payerAddress) {
+          this.send402(res, link);
+          return;
+        }
+        const payment2 = await this.storage.getConfirmedPaymentByAddress(link.id, payerAddress);
+        if (payment2) {
+          if (link.maxUses && (link.usedCount ?? 0) >= link.maxUses) {
+            this.send403(res, "LINK_USAGE_LIMIT_REACHED" /* LINK_USAGE_LIMIT_REACHED */, link.id, {
+              maxUses: link.maxUses,
+              usedCount: link.usedCount
+            });
+            return;
+          }
+          link.usedCount = (link.usedCount ?? 0) + 1;
+          await this.storage.updatePayLink(link);
+          res.redirect(302, link.targetUrl);
+          return;
+        }
+        this.send402(res, link);
         return;
       }
       const payment = await this.storage.getConfirmedPayment(link.id);
@@ -1331,7 +2467,28 @@ var PaylinkServer = class {
         res.json({ status: "forbidden" });
         return;
       }
-      if (isExpired(link.expiresAt) || isLimitReached(link.usedCount, link.maxUses)) {
+      if (isExpired(link.expiresAt)) {
+        res.json({ status: "forbidden" });
+        return;
+      }
+      if (link.multiUse) {
+        const payerAddress = req.query.payer;
+        if (!payerAddress) {
+          res.json({
+            status: "multiUse",
+            message: "Provide ?payer=ADDRESS to check payment status",
+            totalPayments: (await this.storage.getPaymentsByLink(link.id)).filter((p) => p.confirmed).length
+          });
+          return;
+        }
+        const payment2 = await this.storage.getConfirmedPaymentByAddress(link.id, payerAddress);
+        res.json({
+          status: payment2 ? "paid" : "unpaid",
+          payerAddress
+        });
+        return;
+      }
+      if (isLimitReached(link.usedCount, link.maxUses)) {
         res.json({ status: "forbidden" });
         return;
       }
@@ -1344,7 +2501,7 @@ var PaylinkServer = class {
   }
   async handleConfirm(req, res) {
     try {
-      const { txHash } = req.body;
+      const { txHash, chainId: requestedChainId, referralCode } = req.body;
       if (!txHash || typeof txHash !== "string") {
         res.status(400).json({ status: "failed", message: "Missing txHash" });
         return;
@@ -1359,36 +2516,97 @@ var PaylinkServer = class {
         res.json({ status: "confirmed", message: "Already confirmed" });
         return;
       }
-      const verifier = this.verifiers.get(link.price.chainId);
+      let chainId = link.price.chainId;
+      let expectedAmount = link.price.amount;
+      let recipient = link.recipientAddress;
+      let tokenSymbol = link.price.tokenSymbol;
+      if (requestedChainId !== void 0) {
+        const numChainId = Number(requestedChainId);
+        if (numChainId === link.price.chainId) {
+          chainId = link.price.chainId;
+          expectedAmount = link.price.amount;
+          tokenSymbol = link.price.tokenSymbol;
+        } else if (link.paymentOptions) {
+          const option = link.paymentOptions.find((opt) => opt.chainId === numChainId);
+          if (option) {
+            chainId = option.chainId;
+            expectedAmount = option.amount;
+            tokenSymbol = option.tokenSymbol;
+            recipient = option.recipientAddress || link.recipientAddress;
+          } else {
+            res.status(400).json({ status: "failed", message: "Chain not accepted for this payment link" });
+            return;
+          }
+        } else {
+          res.status(400).json({ status: "failed", message: "Chain not accepted for this payment link" });
+          return;
+        }
+      }
+      const verifier = this.verifiers.get(chainId);
       if (!verifier) {
-        res.status(400).json({ status: "failed", message: "Chain not supported" });
+        res.status(400).json({ status: "failed", message: "Chain not supported by server" });
         return;
       }
       const result = await verifier.verifyPayment({
         txHash,
-        recipient: link.recipientAddress,
-        amount: link.price.amount
+        recipient,
+        amount: expectedAmount
       });
       switch (result.status) {
         case "confirmed": {
           const payment = {
             id: generateUUID(),
             payLinkId: link.id,
-            chainId: link.price.chainId,
+            chainId,
             txHash,
             fromAddress: result.fromAddress ?? "",
-            amount: result.actualAmount ?? link.price.amount,
+            amount: result.actualAmount ?? expectedAmount,
+            tokenSymbol,
             confirmed: true,
             createdAt: /* @__PURE__ */ new Date(),
-            confirmedAt: /* @__PURE__ */ new Date()
+            confirmedAt: /* @__PURE__ */ new Date(),
+            referralCode: referralCode || void 0
           };
           await this.storage.savePayment(payment);
+          let commission = null;
+          if (referralCode && link.referral?.enabled) {
+            try {
+              commission = await this.referralManager.processReferralPayment(
+                payment,
+                link,
+                referralCode
+              );
+              if (commission && this.webhookManager) {
+                const referral = await this.storage.getReferral(commission.referralId);
+                if (referral) {
+                  this.webhookManager.sendCommissionEvent(
+                    "commission.confirmed",
+                    commission,
+                    referral,
+                    link
+                  ).catch((err) => {
+                    console.error("Commission webhook error:", err);
+                  });
+                }
+              }
+            } catch (err) {
+              console.error("Referral processing error:", err);
+            }
+          }
           if (this.webhookManager) {
             this.webhookManager.sendPaymentEvent("payment.confirmed", payment, link).catch((err) => {
               console.error("Webhook error:", err);
             });
           }
-          res.json({ status: "confirmed" });
+          res.json({
+            status: "confirmed",
+            chainId,
+            tokenSymbol,
+            referral: commission ? {
+              commissionId: commission.id,
+              commissionAmount: commission.commissionAmount
+            } : void 0
+          });
           break;
         }
         case "pending":
@@ -1396,10 +2614,11 @@ var PaylinkServer = class {
             const pendingPayment = {
               id: generateUUID(),
               payLinkId: link.id,
-              chainId: link.price.chainId,
+              chainId,
               txHash,
               fromAddress: result.fromAddress ?? "",
-              amount: result.actualAmount ?? link.price.amount,
+              amount: result.actualAmount ?? expectedAmount,
+              tokenSymbol,
               confirmed: false,
               createdAt: /* @__PURE__ */ new Date()
             };
@@ -1414,7 +2633,7 @@ var PaylinkServer = class {
             const underpaidPayment = {
               id: generateUUID(),
               payLinkId: link.id,
-              chainId: link.price.chainId,
+              chainId,
               txHash,
               fromAddress: result.fromAddress ?? "",
               amount: result.actualAmount ?? "0",
@@ -1489,6 +2708,156 @@ var PaylinkServer = class {
     }
   }
   // ========================================
+  // SUBSCRIPTION HANDLERS
+  // ========================================
+  /**
+   * Handle subscription creation/renewal
+   */
+  async handleSubscribe(req, res) {
+    try {
+      const { subscriberAddress, txHash } = req.body;
+      if (!subscriberAddress) {
+        res.status(400).json({ error: "Missing subscriberAddress" });
+        return;
+      }
+      const link = await this.storage.getPayLink(req.params.id);
+      if (!link) {
+        res.status(404).json({ error: "Payment link not found" });
+        return;
+      }
+      if (!link.subscription) {
+        res.status(400).json({ error: "This link does not support subscriptions" });
+        return;
+      }
+      let subscription = await this.storage.getSubscriptionByAddress(link.id, subscriberAddress);
+      if (txHash) {
+        const verifier = this.verifiers.get(link.price.chainId);
+        if (!verifier) {
+          res.status(400).json({ error: "Chain not supported" });
+          return;
+        }
+        const result = await verifier.verifyPayment({
+          txHash,
+          recipient: link.recipientAddress,
+          amount: link.price.amount
+        });
+        if (result.status !== "confirmed") {
+          res.status(400).json({
+            error: "Payment not confirmed",
+            status: result.status
+          });
+          return;
+        }
+        const payment = {
+          id: generateUUID(),
+          payLinkId: link.id,
+          chainId: link.price.chainId,
+          txHash,
+          fromAddress: result.fromAddress ?? subscriberAddress,
+          amount: result.actualAmount ?? link.price.amount,
+          confirmed: true,
+          createdAt: /* @__PURE__ */ new Date(),
+          confirmedAt: /* @__PURE__ */ new Date()
+        };
+        await this.storage.savePayment(payment);
+        if (this.webhookManager) {
+          this.webhookManager.sendPaymentEvent("payment.confirmed", payment, link).catch((err) => {
+            console.error("Webhook error:", err);
+          });
+        }
+        if (subscription) {
+          subscription = await this.subscriptionManager.processPayment(subscription, payment, link);
+          if (this.webhookManager) {
+            this.webhookManager.sendSubscriptionEvent("subscription.renewed", subscription, link).catch((err) => {
+              console.error("Webhook error:", err);
+            });
+          }
+          res.json({
+            success: true,
+            action: "renewed",
+            subscription: this.formatSubscriptionResponse(subscription, link)
+          });
+          return;
+        }
+      }
+      if (!subscription) {
+        subscription = await this.createSubscription(link.id, subscriberAddress);
+        res.status(201).json({
+          success: true,
+          action: "created",
+          subscription: this.formatSubscriptionResponse(subscription, link)
+        });
+        return;
+      }
+      res.json({
+        success: true,
+        action: "existing",
+        subscription: this.formatSubscriptionResponse(subscription, link)
+      });
+    } catch (error) {
+      console.error("Subscribe error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  }
+  /**
+   * Handle get subscription status
+   */
+  async handleGetSubscription(req, res) {
+    try {
+      const subscriberAddress = req.query.subscriber;
+      if (!subscriberAddress) {
+        res.status(400).json({ error: "Missing subscriber query parameter" });
+        return;
+      }
+      const link = await this.storage.getPayLink(req.params.id);
+      if (!link) {
+        res.status(404).json({ error: "Payment link not found" });
+        return;
+      }
+      const subscription = await this.storage.getSubscriptionByAddress(link.id, subscriberAddress);
+      if (!subscription) {
+        res.status(404).json({ error: "Subscription not found" });
+        return;
+      }
+      const access = await this.subscriptionManager.checkAccess(subscription, link);
+      res.json({
+        subscription: this.formatSubscriptionResponse(subscription, link),
+        access: {
+          hasAccess: access.hasAccess,
+          reason: access.reason,
+          requiresPayment: access.requiresPayment
+        }
+      });
+    } catch (error) {
+      console.error("Get subscription error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  }
+  /**
+   * Format subscription for response
+   */
+  formatSubscriptionResponse(subscription, link) {
+    const base = this.config.baseUrl || `http://localhost:${this.config.port}`;
+    return {
+      id: subscription.id,
+      payLinkId: subscription.payLinkId,
+      subscriberAddress: subscription.subscriberAddress,
+      status: subscription.status,
+      interval: link.subscription?.interval,
+      intervalCount: link.subscription?.intervalCount ?? 1,
+      currentPeriodStart: subscription.currentPeriodStart.toISOString(),
+      currentPeriodEnd: subscription.currentPeriodEnd.toISOString(),
+      nextPaymentDue: subscription.nextPaymentDue.toISOString(),
+      cycleCount: subscription.cycleCount,
+      trialEndsAt: subscription.trialEndsAt?.toISOString(),
+      cancelledAt: subscription.cancelledAt?.toISOString(),
+      pausedAt: subscription.pausedAt?.toISOString(),
+      createdAt: subscription.createdAt.toISOString(),
+      price: link.price,
+      renewUrl: `${base}${this.config.basePath}/${link.id}/subscribe`
+    };
+  }
+  // ========================================
   // ADMIN API HANDLERS
   // ========================================
   async apiCreateLink(req, res) {
@@ -1501,19 +2870,63 @@ var PaylinkServer = class {
         recipientAddress,
         description,
         maxUses,
-        expiresIn
+        expiresIn,
+        // Multi-currency payment options
+        paymentOptions,
+        // Subscription fields
+        subscription,
+        // Multi-use mode
+        multiUse,
+        // Referral configuration
+        referral
       } = req.body;
       if (!targetUrl || !amount || !recipientAddress) {
         res.status(400).json({ error: "Missing: targetUrl, amount, or recipientAddress" });
         return;
       }
+      let parsedPaymentOptions;
+      if (paymentOptions && Array.isArray(paymentOptions)) {
+        parsedPaymentOptions = paymentOptions.map((opt) => ({
+          tokenSymbol: opt.tokenSymbol,
+          chainId: Number(opt.chainId),
+          amount: String(opt.amount),
+          recipientAddress: opt.recipientAddress
+        }));
+      }
+      let subscriptionConfig;
+      if (subscription) {
+        if (!subscription.interval || !["daily", "weekly", "monthly", "yearly"].includes(subscription.interval)) {
+          res.status(400).json({ error: "Invalid subscription interval. Must be: daily, weekly, monthly, or yearly" });
+          return;
+        }
+        subscriptionConfig = {
+          interval: subscription.interval,
+          intervalCount: subscription.intervalCount ? Number(subscription.intervalCount) : 1,
+          gracePeriodHours: subscription.gracePeriodHours ? Number(subscription.gracePeriodHours) : 24,
+          maxCycles: subscription.maxCycles ? Number(subscription.maxCycles) : void 0,
+          trialDays: subscription.trialDays ? Number(subscription.trialDays) : 0
+        };
+      }
+      let referralConfig;
+      if (referral && referral.enabled) {
+        referralConfig = {
+          enabled: true,
+          commissionPercent: referral.commissionPercent ? Number(referral.commissionPercent) : 10,
+          minPayoutThreshold: referral.minPayoutThreshold ? String(referral.minPayoutThreshold) : void 0,
+          expirationDays: referral.expirationDays ? Number(referral.expirationDays) : void 0
+        };
+      }
       const link = await this.createPayLink({
         targetUrl,
         price: { amount: String(amount), tokenSymbol, chainId: Number(chainId) },
+        paymentOptions: parsedPaymentOptions,
         recipientAddress,
         description,
         maxUses: maxUses ? Number(maxUses) : void 0,
-        expiresAt: expiresIn ? new Date(Date.now() + Number(expiresIn) * 1e3) : void 0
+        expiresAt: expiresIn ? new Date(Date.now() + Number(expiresIn) * 1e3) : void 0,
+        subscription: subscriptionConfig,
+        multiUse: multiUse === true || multiUse === "true",
+        referral: referralConfig
       });
       const base = this.config.baseUrl || `http://localhost:${this.config.port}`;
       res.status(201).json({
@@ -1523,10 +2936,26 @@ var PaylinkServer = class {
           url: `${base}${this.config.basePath}/${link.id}`,
           targetUrl: link.targetUrl,
           price: link.price,
+          paymentOptions: link.paymentOptions,
           recipientAddress: link.recipientAddress,
           description: link.description,
           maxUses: link.maxUses,
-          expiresAt: link.expiresAt?.toISOString()
+          multiUse: link.multiUse,
+          expiresAt: link.expiresAt?.toISOString(),
+          subscription: link.subscription ? {
+            interval: link.subscription.interval,
+            intervalCount: link.subscription.intervalCount,
+            gracePeriodHours: link.subscription.gracePeriodHours,
+            maxCycles: link.subscription.maxCycles,
+            trialDays: link.subscription.trialDays,
+            subscribeUrl: `${base}${this.config.basePath}/${link.id}/subscribe`
+          } : void 0,
+          referral: link.referral ? {
+            enabled: link.referral.enabled,
+            commissionPercent: link.referral.commissionPercent,
+            minPayoutThreshold: link.referral.minPayoutThreshold,
+            expirationDays: link.referral.expirationDays
+          } : void 0
         }
       });
     } catch (error) {
@@ -1544,7 +2973,9 @@ var PaylinkServer = class {
         url: `${base}${this.config.basePath}/${l.id}`,
         status: l.status,
         price: l.price,
-        usedCount: l.usedCount
+        usedCount: l.usedCount,
+        isSubscription: !!l.subscription,
+        subscription: l.subscription
       }))
     });
   }
@@ -1591,9 +3022,339 @@ var PaylinkServer = class {
     });
   }
   // ========================================
+  // SUBSCRIPTION ADMIN ENDPOINTS
+  // ========================================
+  async apiListSubscriptions(req, res) {
+    const subscriptions = await this.storage.getAllSubscriptions();
+    res.json({
+      count: subscriptions.length,
+      subscriptions: subscriptions.map((s) => ({
+        id: s.id,
+        payLinkId: s.payLinkId,
+        subscriberAddress: s.subscriberAddress,
+        status: s.status,
+        cycleCount: s.cycleCount,
+        nextPaymentDue: s.nextPaymentDue.toISOString(),
+        createdAt: s.createdAt.toISOString()
+      }))
+    });
+  }
+  async apiGetSubscription(req, res) {
+    const subscription = await this.storage.getSubscription(req.params.id);
+    if (!subscription) {
+      res.status(404).json({ error: "Subscription not found" });
+      return;
+    }
+    const link = await this.storage.getPayLink(subscription.payLinkId);
+    res.json({
+      id: subscription.id,
+      payLinkId: subscription.payLinkId,
+      subscriberAddress: subscription.subscriberAddress,
+      status: subscription.status,
+      currentPeriodStart: subscription.currentPeriodStart.toISOString(),
+      currentPeriodEnd: subscription.currentPeriodEnd.toISOString(),
+      nextPaymentDue: subscription.nextPaymentDue.toISOString(),
+      cycleCount: subscription.cycleCount,
+      lastPaymentId: subscription.lastPaymentId,
+      trialEndsAt: subscription.trialEndsAt?.toISOString(),
+      cancelledAt: subscription.cancelledAt?.toISOString(),
+      pausedAt: subscription.pausedAt?.toISOString(),
+      createdAt: subscription.createdAt.toISOString(),
+      updatedAt: subscription.updatedAt.toISOString(),
+      payLink: link ? {
+        id: link.id,
+        targetUrl: link.targetUrl,
+        price: link.price,
+        subscription: link.subscription
+      } : void 0
+    });
+  }
+  async apiCancelSubscription(req, res) {
+    try {
+      const subscription = await this.cancelSubscription(req.params.id);
+      res.json({ success: true, subscription: { id: subscription.id, status: subscription.status } });
+    } catch (error) {
+      res.status(404).json({ error: error.message });
+    }
+  }
+  async apiPauseSubscription(req, res) {
+    try {
+      const subscription = await this.pauseSubscription(req.params.id);
+      res.json({ success: true, subscription: { id: subscription.id, status: subscription.status } });
+    } catch (error) {
+      res.status(400).json({ error: error.message });
+    }
+  }
+  async apiResumeSubscription(req, res) {
+    try {
+      const subscription = await this.resumeSubscription(req.params.id);
+      res.json({ success: true, subscription: { id: subscription.id, status: subscription.status } });
+    } catch (error) {
+      res.status(400).json({ error: error.message });
+    }
+  }
+  // ========================================
+  // REFERRAL ADMIN ENDPOINTS
+  // ========================================
+  async apiCreateReferral(req, res) {
+    try {
+      const { payLinkId, referrerAddress, code, metadata } = req.body;
+      if (!payLinkId || !referrerAddress) {
+        res.status(400).json({ error: "Missing: payLinkId or referrerAddress" });
+        return;
+      }
+      const referral = await this.referralManager.createReferral({
+        payLinkId,
+        referrerAddress,
+        code,
+        metadata
+      });
+      const link = await this.storage.getPayLink(payLinkId);
+      const base = this.config.baseUrl || `http://localhost:${this.config.port}`;
+      if (this.webhookManager && link) {
+        this.webhookManager.sendReferralEvent("referral.created", referral, link).catch((err) => {
+          console.error("Referral webhook error:", err);
+        });
+      }
+      res.status(201).json({
+        success: true,
+        referral: {
+          id: referral.id,
+          code: referral.code,
+          referrerAddress: referral.referrerAddress,
+          payLinkId: referral.payLinkId,
+          status: referral.status,
+          referralUrl: buildReferralUrl(base, payLinkId, referral.code),
+          createdAt: referral.createdAt.toISOString()
+        }
+      });
+    } catch (error) {
+      console.error("Create referral error:", error);
+      res.status(400).json({ error: error.message });
+    }
+  }
+  async apiListReferrals(req, res) {
+    try {
+      const { payLinkId, referrerAddress } = req.query;
+      let referrals;
+      if (payLinkId) {
+        referrals = await this.storage.getReferralsByPayLink(payLinkId);
+      } else if (referrerAddress) {
+        referrals = await this.storage.getReferralsByReferrer(referrerAddress);
+      } else {
+        referrals = await this.storage.getAllReferrals();
+      }
+      const base = this.config.baseUrl || `http://localhost:${this.config.port}`;
+      res.json({
+        count: referrals.length,
+        referrals: referrals.map((r) => ({
+          id: r.id,
+          code: r.code,
+          referrerAddress: r.referrerAddress,
+          payLinkId: r.payLinkId,
+          totalReferrals: r.totalReferrals,
+          confirmedReferrals: r.confirmedReferrals,
+          totalEarned: r.totalEarned,
+          pendingAmount: r.pendingAmount,
+          paidAmount: r.paidAmount,
+          status: r.status,
+          referralUrl: buildReferralUrl(base, r.payLinkId, r.code),
+          createdAt: r.createdAt.toISOString()
+        }))
+      });
+    } catch (error) {
+      console.error("List referrals error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  }
+  async apiGetReferral(req, res) {
+    try {
+      const referral = await this.storage.getReferral(req.params.id);
+      if (!referral) {
+        res.status(404).json({ error: "Referral not found" });
+        return;
+      }
+      const base = this.config.baseUrl || `http://localhost:${this.config.port}`;
+      res.json({
+        id: referral.id,
+        code: referral.code,
+        referrerAddress: referral.referrerAddress,
+        payLinkId: referral.payLinkId,
+        totalReferrals: referral.totalReferrals,
+        confirmedReferrals: referral.confirmedReferrals,
+        totalEarned: referral.totalEarned,
+        pendingAmount: referral.pendingAmount,
+        paidAmount: referral.paidAmount,
+        status: referral.status,
+        referralUrl: buildReferralUrl(base, referral.payLinkId, referral.code),
+        createdAt: referral.createdAt.toISOString(),
+        updatedAt: referral.updatedAt.toISOString(),
+        metadata: referral.metadata
+      });
+    } catch (error) {
+      console.error("Get referral error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  }
+  async apiGetReferralByCode(req, res) {
+    try {
+      const referral = await this.storage.getReferralByCode(req.params.code);
+      if (!referral) {
+        res.status(404).json({ error: "Referral not found" });
+        return;
+      }
+      const base = this.config.baseUrl || `http://localhost:${this.config.port}`;
+      res.json({
+        id: referral.id,
+        code: referral.code,
+        referrerAddress: referral.referrerAddress,
+        payLinkId: referral.payLinkId,
+        totalReferrals: referral.totalReferrals,
+        confirmedReferrals: referral.confirmedReferrals,
+        totalEarned: referral.totalEarned,
+        pendingAmount: referral.pendingAmount,
+        status: referral.status,
+        referralUrl: buildReferralUrl(base, referral.payLinkId, referral.code),
+        createdAt: referral.createdAt.toISOString()
+      });
+    } catch (error) {
+      console.error("Get referral by code error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  }
+  async apiDisableReferral(req, res) {
+    try {
+      const referral = await this.referralManager.disableReferral(req.params.id);
+      const link = await this.storage.getPayLink(referral.payLinkId);
+      if (this.webhookManager && link) {
+        this.webhookManager.sendReferralEvent("referral.disabled", referral, link).catch((err) => {
+          console.error("Referral webhook error:", err);
+        });
+      }
+      res.json({ success: true, referral: { id: referral.id, status: referral.status } });
+    } catch (error) {
+      res.status(404).json({ error: error.message });
+    }
+  }
+  async apiGetReferralStats(req, res) {
+    try {
+      const referral = await this.storage.getReferral(req.params.id);
+      if (!referral) {
+        res.status(404).json({ error: "Referral not found" });
+        return;
+      }
+      const stats = await this.referralManager.getStats(referral.referrerAddress);
+      res.json({
+        referralId: referral.id,
+        code: referral.code,
+        stats
+      });
+    } catch (error) {
+      console.error("Get referral stats error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  }
+  async apiListCommissions(req, res) {
+    try {
+      const { referralId, referrerAddress, status } = req.query;
+      let commissions;
+      if (referralId) {
+        commissions = await this.storage.getCommissionsByReferral(referralId);
+      } else if (referrerAddress) {
+        commissions = await this.storage.getCommissionsByReferrer(referrerAddress);
+      } else {
+        commissions = await this.storage.getAllCommissions();
+      }
+      if (status) {
+        commissions = commissions.filter((c) => c.status === status);
+      }
+      res.json({
+        count: commissions.length,
+        commissions: commissions.map((c) => ({
+          id: c.id,
+          referralId: c.referralId,
+          paymentId: c.paymentId,
+          payLinkId: c.payLinkId,
+          referrerAddress: c.referrerAddress,
+          referredAddress: c.referredAddress,
+          paymentAmount: c.paymentAmount,
+          commissionAmount: c.commissionAmount,
+          commissionPercent: c.commissionPercent,
+          tokenSymbol: c.tokenSymbol,
+          chainId: c.chainId,
+          status: c.status,
+          createdAt: c.createdAt.toISOString(),
+          confirmedAt: c.confirmedAt?.toISOString(),
+          paidAt: c.paidAt?.toISOString(),
+          payoutTxHash: c.payoutTxHash
+        }))
+      });
+    } catch (error) {
+      console.error("List commissions error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  }
+  async apiGetPendingCommissions(req, res) {
+    try {
+      const commissions = await this.referralManager.getPendingCommissions(req.params.address);
+      const totalPending = commissions.reduce(
+        (sum, c) => sum + parseFloat(c.commissionAmount),
+        0
+      );
+      res.json({
+        address: req.params.address,
+        count: commissions.length,
+        totalPending: totalPending.toString(),
+        commissions: commissions.map((c) => ({
+          id: c.id,
+          referralId: c.referralId,
+          commissionAmount: c.commissionAmount,
+          tokenSymbol: c.tokenSymbol,
+          chainId: c.chainId,
+          createdAt: c.createdAt.toISOString(),
+          confirmedAt: c.confirmedAt?.toISOString()
+        }))
+      });
+    } catch (error) {
+      console.error("Get pending commissions error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  }
+  async apiMarkCommissionPaid(req, res) {
+    try {
+      const { payoutTxHash } = req.body;
+      if (!payoutTxHash) {
+        res.status(400).json({ error: "Missing payoutTxHash" });
+        return;
+      }
+      const commission = await this.referralManager.markCommissionPaid(
+        req.params.id,
+        payoutTxHash
+      );
+      const referral = await this.storage.getReferral(commission.referralId);
+      const link = await this.storage.getPayLink(commission.payLinkId);
+      if (this.webhookManager && referral && link) {
+        this.webhookManager.sendCommissionEvent("commission.paid", commission, referral, link).catch((err) => {
+          console.error("Commission webhook error:", err);
+        });
+      }
+      res.json({
+        success: true,
+        commission: {
+          id: commission.id,
+          status: commission.status,
+          payoutTxHash: commission.payoutTxHash,
+          paidAt: commission.paidAt?.toISOString()
+        }
+      });
+    } catch (error) {
+      res.status(400).json({ error: error.message });
+    }
+  }
+  // ========================================
   // RESPONSE HELPERS
   // ========================================
-  send402(res, link) {
+  send402(res, link, subscription) {
     const base = this.config.baseUrl || `http://localhost:${this.config.port}`;
     const nonce = generateNonce();
     const body = {
@@ -1616,6 +3377,24 @@ var PaylinkServer = class {
       },
       nonce
     };
+    if (link.paymentOptions && link.paymentOptions.length > 0) {
+      body.paymentOptions = link.paymentOptions.map((opt) => ({
+        chainId: opt.chainId,
+        tokenSymbol: opt.tokenSymbol,
+        amount: opt.amount,
+        recipient: opt.recipientAddress || link.recipientAddress
+      }));
+    }
+    if (link.subscription) {
+      body.subscription = {
+        interval: link.subscription.interval,
+        intervalCount: link.subscription.intervalCount ?? 1,
+        trialDays: link.subscription.trialDays,
+        existingSubscriptionId: subscription?.id,
+        subscriptionStatus: subscription?.status,
+        nextPaymentDue: subscription?.nextPaymentDue.toISOString()
+      };
+    }
     if (this.config.signatureSecret) {
       const data = JSON.stringify({ payLinkId: body.payLinkId, payment: body.payment, nonce });
       body.signature = sign(data, this.config.signatureSecret);
@@ -1901,6 +3680,7 @@ function formatPaylinkAmount(amount) {
 0 && (module.exports = {
   ChainVerifier,
   DEFAULT_DISCOUNT_TIERS,
+  DEFAULT_REFERRAL_CONFIG,
   MemoryStorage,
   MockSolanaVerifier,
   MockVerifier,
@@ -1909,13 +3689,20 @@ function formatPaylinkAmount(amount) {
   PaylinkTokenManager,
   REASON_MESSAGES,
   ReasonCode,
+  ReferralManager,
   SOLANA_CHAIN_IDS,
   SolanaVerifier,
+  SubscriptionManager,
   WebhookManager,
+  buildReferralUrl,
+  calculateCommission,
+  calculateNextBillingDate,
   compareAmounts,
   createPaylinkTokenManager,
+  createReferralManager,
   createServer,
   createSolanaVerifier,
+  createSubscriptionManager,
   createWebhookManager,
   formatPaylinkAmount,
   generateId,
@@ -1924,10 +3711,18 @@ function formatPaylinkAmount(amount) {
   generatePaymentURI,
   generateQRCodeDataURL,
   generateQRCodeSVG,
+  generateReferralCode,
   generateUUID,
+  getIntervalDisplayName,
+  isCommissionExpired,
   isExpired,
+  isInTrialPeriod,
   isLimitReached,
   isPaylinkToken,
+  isPaymentDue,
+  isValidReferralCode,
+  isWithinGracePeriod,
+  parseReferralCode,
   sign,
   verifyWebhookSignature
 });

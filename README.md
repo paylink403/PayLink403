@@ -4,11 +4,12 @@ Self-hosted paid links with 402/403 protocol and blockchain payment verification
 
 **Each user runs their own server with their own RPC nodes.**
 
-## What's New in v1.5.0
+## What's New in v1.6.0
 
-- 🔄 **Multi-Use Links** - One link, multiple payers - each pays once for access
-- 👥 **Per-Address Tracking** - Track who has paid, grant access individually
-- 📊 **Usage Stats** - See total payments on multi-use links
+- 🎁 **Referral System** - Viral growth through referral rewards
+- 💰 **Commission Tracking** - Automatic commission calculation and tracking
+- 📊 **Referral Stats** - Track conversions, earnings, and payouts
+- 🔗 **Shareable Links** - Generate unique referral URLs
 
 ## Features
 
@@ -16,6 +17,7 @@ Self-hosted paid links with 402/403 protocol and blockchain payment verification
 - 🔄 **Multi-use links** - Sell access to unlimited users with one link
 - 💱 **Multi-currency support** - Accept ETH, SOL, USDC, etc. on one link
 - 🔄 **Subscription links** with recurring payments
+- 🎁 **Referral system** - Reward users for sharing your links
 - ⛓️ Multi-chain support (EVM chains + Solana)
 - 📱 QR codes with wallet deep links (Solana Pay, EIP-681)
 - 🔔 Webhook notifications for payment and subscription events
@@ -133,6 +135,15 @@ server.start();
 | POST | `/api/subscriptions/:id/cancel` | Cancel subscription |
 | POST | `/api/subscriptions/:id/pause` | Pause subscription |
 | POST | `/api/subscriptions/:id/resume` | Resume subscription |
+| POST | `/api/referrals` | Create referral |
+| GET | `/api/referrals` | List referrals |
+| GET | `/api/referrals/:id` | Get referral details |
+| GET | `/api/referrals/code/:code` | Get referral by code |
+| POST | `/api/referrals/:id/disable` | Disable referral |
+| GET | `/api/referrals/:id/stats` | Get referral stats |
+| GET | `/api/commissions` | List commissions |
+| GET | `/api/commissions/pending/:address` | Get pending payouts |
+| POST | `/api/commissions/:id/payout` | Mark commission as paid |
 
 ## Usage Examples
 
@@ -308,6 +319,116 @@ Status Response:
 | Access check | Any payment | By payer address | By subscriber address |
 | Recurring | No | No | Yes |
 | Use case | One-time purchase | Sell to many | Recurring access |
+
+### Referral System
+
+Enable referral rewards for any payment link:
+
+```bash
+# Create a link with referral program enabled
+curl -X POST http://localhost:3000/api/links \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-secret-key" \
+  -d '{
+    "targetUrl": "https://example.com/premium",
+    "amount": "0.1",
+    "tokenSymbol": "SOL",
+    "chainId": 101,
+    "recipientAddress": "YourWalletAddress",
+    "referral": {
+      "enabled": true,
+      "commissionPercent": 10
+    }
+  }'
+```
+
+Create a referral for a user:
+
+```bash
+# Create referral code
+curl -X POST http://localhost:3000/api/referrals \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-secret-key" \
+  -d '{
+    "payLinkId": "abc123",
+    "referrerAddress": "ReferrerWalletAddress"
+  }'
+```
+
+Response:
+```json
+{
+  "success": true,
+  "referral": {
+    "id": "ref_xyz789",
+    "code": "ABC123XY",
+    "referrerAddress": "ReferrerWalletAddress",
+    "payLinkId": "abc123",
+    "referralUrl": "http://localhost:3000/pay/abc123?ref=ABC123XY",
+    "status": "active"
+  }
+}
+```
+
+When someone pays using a referral link:
+
+```bash
+# Confirm payment with referral code
+curl -X POST http://localhost:3000/pay/abc123/confirm \
+  -H "Content-Type: application/json" \
+  -d '{
+    "txHash": "0x...",
+    "referralCode": "ABC123XY"
+  }'
+```
+
+Response includes commission info:
+```json
+{
+  "status": "confirmed",
+  "chainId": 101,
+  "tokenSymbol": "SOL",
+  "referral": {
+    "commissionId": "com_abc123",
+    "commissionAmount": "0.01"
+  }
+}
+```
+
+Check pending commissions:
+
+```bash
+curl http://localhost:3000/api/commissions/pending/ReferrerWalletAddress \
+  -H "X-API-Key: your-secret-key"
+```
+
+Response:
+```json
+{
+  "address": "ReferrerWalletAddress",
+  "count": 5,
+  "totalPending": "0.05",
+  "commissions": [
+    {
+      "id": "com_abc123",
+      "commissionAmount": "0.01",
+      "tokenSymbol": "SOL",
+      "status": "confirmed"
+    }
+  ]
+}
+```
+
+Mark commission as paid:
+
+```bash
+curl -X POST http://localhost:3000/api/commissions/com_abc123/payout \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-secret-key" \
+  -d '{
+    "payoutTxHash": "0x..."
+  }'
+```
 
 ### Get QR Code
 
@@ -521,6 +642,7 @@ Response:
 
 ```javascript
 {
+  // Required: billing interval
   interval: 'monthly',
   
   // Number of intervals between billings (default: 1)
